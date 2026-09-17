@@ -1,5 +1,5 @@
 const { readHistory, updateHistory, visibleForUser } = require("./_lib/history");
-const { probeConditionalWrites } = require("./_lib/storage");
+const { probeConditionalWrites, probeConcurrentUpdates } = require("./_lib/storage");
 const { getUser, adminUsers, requireAdmin } = require("./_lib/auth");
 const { sendJson } = require("./_lib/respond");
 const { withThumb, imageBlobUrls } = require("./_lib/thumbs");
@@ -47,6 +47,12 @@ module.exports = async function handler(req, res) {
     const body = await parseJsonBody(req);
     if (!user) return res.status(401).json({ error: "Not signed in" });
     // Temporary diagnostic (throwaway key only) — remove once conditional writes are verified.
+    if (body.action === "concurrencyProbe") {
+      const n = Math.min(Math.max(parseInt(body.n, 10) || 25, 1), 40);
+      const padKB = Math.min(Math.max(parseInt(body.padKB, 10) || 1, 1), 4000);
+      try { return res.json(await probeConcurrentUpdates({ n, padKB })); }
+      catch (err) { return res.status(500).json({ error: err.message }); }
+    }
     if (body.action === "etagProbe") {
       try { return res.json(await probeConditionalWrites()); }
       catch (err) { return res.status(500).json({ error: err.message }); }

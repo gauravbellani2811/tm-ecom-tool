@@ -133,16 +133,44 @@ const USE_CONDITIONAL_WRITES = false;
 // Read → mutate(data) → conditional write, retried on conflict. `mutate` gets the
 // freshly parsed file (null if missing) and returns the new value, or undefined for
 // "no change". It may run several times, so it must not have side effects.
-async function updateJson(key, mutate, { attempts = 12 } = {}) {
+async function updateJson(key, mutate, { attempts = 12, conditional = USE_CONDITIONAL_WRITES, stats } = {}) {
   for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (stats) stats.attempts = attempt;
     const { data, etag, exists } = await getJsonVersioned(key);
     const next = await mutate(data);
     if (next === undefined) return { data, changed: false };
-    if (!USE_CONDITIONAL_WRITES) { await putJson(key, next); return { data: next, changed: true }; }
+    if (!conditional) { await putJson(key, next); return { data: next, changed: true }; }
     if (await putJsonIfMatch(key, next, { etag, exists })) return { data: next, changed: true };
+    if (stats) stats.conflicts = (stats.conflicts || 0) + 1;
     await sleep(40 + Math.random() * 260 * attempt);
   }
   throw new Error(`Too many simultaneous saves to ${key} — please try again`);
+}
+
+// Diagnostic: N simultaneous conditional updates to a throwaway file padded to
+// `padKB` (to mimic the multi-MB history file). Reports how many landed.
+async function probeConcurrentUpdates({ n = 25, padKB = 1 } = {}) {
+  const key = "zz-concurrency-probe.json";
+  await putJson(key, { pad: "x".repeat(padKB * 1024), items: [] });
+  const t0 = Date.now();
+  const results = await Promise.all(Array.from({ length: n }, async (_, i) => {
+    const stats = { attempts: 0, conflicts: 0 };
+    try {
+      await updateJson(key, d => ({ ...d, items: [...((d && d.items) || []), i] }), { conditional: true, stats });
+      return { ok: true, ...stats };
+    } catch (e) {
+      return { ok: false, error: e.message, ...stats };
+    }
+  }));
+  const final = (await getJsonVersioned(key)).data;
+  await deleteKeys([key]);
+  return {
+    n, padKB, ms: Date.now() - t0,
+    succeeded: results.filter(r => r.ok).length,
+    itemsInFile: ((final && final.items) || []).length,
+    attemptsPerSave: results.map(r => r.attempts),
+    errors: [...new Set(results.filter(r => !r.ok).map(r => r.error))],
+  };
 }
 
 // Diagnostic: exercise R2 conditional writes on a throwaway key and report exactly
@@ -204,4 +232,4 @@ async function deleteKeys(keys) {
   ));
 }
 
-module.exports = { putObject, putImage, putJson, copyObject, getObjectText, getObjectBuffer, isStoredImageKey, listObjects, probeConditionalWrites, getJsonVersioned, putJsonIfMatch, updateJson, getJson, urlToKey, deleteKeys, publicUrl };
+module.exports = { putObject, putImage, putJson, copyObject, getObjectText, getObjectBuffer, isStoredImageKey, listObjects, probeConditionalWrites, probeConcurrentUpdates, getJsonVersioned, putJsonIfMatch, updateJson, getJson, urlToKey, deleteKeys, publicUrl };
