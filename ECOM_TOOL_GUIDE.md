@@ -3,7 +3,9 @@
 The internal product-photography, captioning and catalogue tool for **T. Mangharam** (fabric store).
 Live at **https://tmphotography.vercel.app**
 
-This document describes everything about the system as it is currently deployed: what it does, every screen and button, how data flows, where it's hosted and stored, the AI prompts, the Shopify export format, the Google Sheets automations, the design system, limits, costs, known gaps, and how to operate it.
+This document describes everything about the system as it is currently deployed: what it does, every screen and button, how data flows, where it's hosted and stored, how changes are developed, tested on staging and released, how saves are kept safe, the AI prompts, the Shopify export format, the Google Sheets automations, the design system, limits, costs, known gaps, and how to operate it.
+
+*Last updated: 17 September 2026.*
 
 > Supersedes `PROJECT_OVERVIEW.txt`, which predates the move to Cloudflare R2, per-user templates, captions, Waitlist, History tools, Admin dashboard and Shopify export.
 
@@ -14,8 +16,8 @@ This document describes everything about the system as it is currently deployed:
 1. [What the tool is for](#1-what-the-tool-is-for)
 2. [Who uses it and how work flows](#2-who-uses-it-and-how-work-flows)
 3. [Architecture at a glance](#3-architecture-at-a-glance)
-4. [Hosting & deployment (Vercel)](#4-hosting--deployment-vercel)
-5. [Storage (Cloudflare R2)](#5-storage-cloudflare-r2)
+4. [Hosting, environments & releases](#4-hosting-environments--releases)
+5. [Storage & safe saving (Cloudflare R2)](#5-storage--safe-saving-cloudflare-r2)
 6. [Environment variables](#6-environment-variables)
 7. [Sign-in, identity & roles](#7-sign-in-identity--roles)
 8. [AI models, prompts & costs](#8-ai-models-prompts--costs)
@@ -63,7 +65,7 @@ Volume: roughly 300–400 products a month.
 
 | Username | Role | Typical use |
 |---|---|---|
-| `gaurav2811` | **admin** (owner) | Everything, plus the Admin dashboard and full History visibility |
+| `gaurav2811` | **admin** (owner) | Everything, plus the Admin dashboard (and, through it, every user's History) |
 | `bharatrm` | **staff** | Generating products, captions, exports |
 
 The usernames are an allowlist, not accounts (see §7).
@@ -116,14 +118,32 @@ End of day: Daily Checkout Sheet form → Google Sheet → weekly email every Mo
 | Layer | Technology |
 |---|---|
 | Frontend | React 18.2, Vite 5, `react-image-crop` 11, `jszip` 3 |
-| Backend | Vercel serverless functions, CommonJS Node, `multer` (multipart), `uuid` |
+| Backend | Vercel serverless functions, CommonJS Node, `multer` (multipart), `uuid`, `sharp` (thumbnails) |
 | AI | `@google/genai` — Gemini image and text models |
-| Storage | Cloudflare R2 via `aws4fetch` (S3-compatible signing). **No database.** |
+| Storage | Cloudflare R2 via `aws4fetch` (S3-compatible signing). **No database.** Two buckets: live and staging |
 | Sheets | Google Apps Script web apps (no Google Cloud project or service account) |
+| Code & releases | Git, private GitHub repo `gauravbellani2811/tm-ecom-tool`, Vercel Git integration |
+| Tests | Node's built-in test runner (`npm test`) with an in-memory fake R2 |
+
+**How code reaches the site**
+
+```
+ Laptop (fabric-styler/)          GitHub (private)              Vercel
+ ───────────────────────          ────────────────              ──────
+ edit → npm test → commit
+   │
+   ├─ git push <branch> ────────► branch  ─────────────────────► Preview build
+   │                                                              tmphotography-git-<branch>-….vercel.app
+   │                                                              uses the STAGING bucket (tm-ecom-staging)
+   │
+   └─ git push main ────────────► main    ─────────────────────► Production build
+                                                                  tmphotography.vercel.app
+                                                                  uses the LIVE bucket
+```
 
 ---
 
-## 4. Hosting & deployment (Vercel)
+## 4. Hosting, environments & releases
 
 | Item | Value |
 |---|---|
@@ -133,18 +153,64 @@ End of day: Daily Checkout Sheet form → Google Sheet → weekly email every Mo
 | Build | `npm run build` → `vite build` → `dist/` |
 | Functions | every file in `api/` not starting with `_` (the `api/_lib/` folder is shared code, not endpoints) |
 
-### Deploying
+### Environments
 
-Always deploy **from the `fabric-styler` folder**:
+| Environment | Address | Built from | Storage | Who uses it |
+|---|---|---|---|---|
+| **Production** (live) | https://tmphotography.vercel.app | the `main` branch | live R2 bucket (real History, templates, Waitlist) | the team, every day |
+| **Preview** (staging) | `https://tmphotography-git-<branch>-gaurav-tm-projects.vercel.app` (e.g. `…-git-staging-check-…`) plus a unique address per build | any other branch | **staging** bucket `tm-ecom-staging` — completely separate, starts empty | testing changes before release |
+| Development | `localhost:3000` | the laptop | **live** data via the proxy (see *Local development*) | quick UI work only |
+
+**The rule: nothing goes to `main` (and so to the live site) until it has worked on a Preview.**
+
+Preview sites are protected by **Vercel Authentication** — a browser must be logged in to the Vercel account to open them. Scripts and Claude reach them with the header `x-vercel-protection-bypass: <secret>` (see *Automation bypass secret*).
+
+Staging starts with **no templates and no History**. Copy templates across when needed (§25 *Copy live templates to staging*).
+
+### Git & GitHub
+
+| Item | Value |
+|---|---|
+| Repository | private `https://github.com/gauravbellani2811/tm-ecom-tool` (GitHub account `gauravbellani2811`) |
+| Local folder | `C:\Projects\ecom-photographer\fabric-styler` (the repo root) |
+| Branches | `main` = live · `staging-check` (or any other name) = work in progress / staging · `docs-guide-update` etc. for documentation |
+| Commit identity | set **for this repo only**: name `gauravbellani2811`, email the work address. The laptop's global Git identity belongs to a different project and must not be used here |
+| Sign-in | Git Credential Manager; this repo is pinned to the `gauravbellani2811` GitHub login (`credential.https://github.com.username`), so the other GitHub account on the laptop is never used |
+| Line endings | `.gitattributes` forces LF (the site is built on Linux) |
+| Not committed (`.gitignore`) | `node_modules/`, `dist/`, `.vercel`, every `.env*` file (secrets), legacy `backend/` and `frontend/`, `.claude/settings.local.json` |
+
+Vercel is connected to the repository (**Settings → Git**): a push to `main` builds and publishes Production automatically; a push to any other branch builds a Preview. **Production Branch** is `main` (**Settings → Environments**).
+
+Claude is allowed to run `git push` for this repo (rule in `.claude/settings.local.json`), but only pushes `main` when explicitly asked.
+
+### Release process (checklist)
+
+1. **Branch** — work on a branch, never directly on `main` (`git switch -c <name>`, or reuse `staging-check`).
+2. **Test locally** — `npm test` (all must pass) and `npm run build` (must be clean).
+3. **Commit & push the branch** — `git push` → Vercel builds a Preview in about a minute (Deployments tab shows **Preview**, not Production).
+4. **Check staging** — the Preview loads, the affected screens work, and any risky behaviour is exercised against the staging bucket (for saving: many simultaneous saves, then confirm every one landed).
+5. **You try it** on the branch address and approve.
+6. **Pick a quiet moment** — don't release while someone is mid-batch (a release replaces the backend under an open page).
+7. **Release** — fast-forward `main` to the tested branch (`git switch main` → `git merge --ff-only <branch>`), run `npm test` again, then `git push origin main`.
+8. **Verify live** — the Deployments tab shows a new **Production** build as *Ready*; History and templates load; do one real action of the kind that changed.
+9. **Tell users to refresh** any open tab once, so they get the new version.
+10. **If anything is wrong: roll back** — Vercel → Deployments → the previous Production deployment → **⋯ → Promote**. The old version is live again within seconds; then fix on a branch.
+
+> ⚠️ **Never use Vercel's "Redeploy" button to rebuild staging.** Its dialog defaults to **Production** and to whichever deployment it considers current — pressing it once nearly re-released a broken build. To rebuild a Preview (e.g. after changing Preview environment variables), push a commit to the branch instead; an empty one is fine: `git commit --allow-empty -m "Rebuild staging"` then `git push`.
+
+> 💡 The terminal in the desktop app is Windows PowerShell 5.1, which does not understand `&&`. Run commands one per line.
+
+### The Vercel CLI
+
+Direct CLI deploys (`vercel --prod`) bypass GitHub and staging and are **no longer used for releases**. The CLI is still handy for read-only checks, which must be run **from the `fabric-styler` folder**:
 
 ```bash
-cd fabric-styler
-vercel --prod --yes
+vercel ls              # recent deployments (Preview and Production)
+vercel inspect tmphotography.vercel.app   # which deployment is live, its aliases
+vercel env ls          # variable names and which environments they apply to (never values)
 ```
 
-A successful deploy ends with `Aliased https://tmphotography.vercel.app`.
-
-> **Pitfall:** the parent folder (`ecom-photographer`) is linked to a *different* Vercel project, and a leftover link exists in `public/.vercel/`. Running `vercel --prod` from the wrong folder deploys to a stray project while the live site stays unchanged. The correct link lives in `fabric-styler/.vercel/project.json` (project `tm_photography`).
+> **Pitfall:** the parent folder (`ecom-photographer`) is linked to a *different* Vercel project, and a leftover link exists in `public/.vercel/`. CLI commands from the wrong folder act on a stray project. The correct link lives in `fabric-styler/.vercel/project.json` (project `tm_photography`).
 
 `.vercelignore` excludes the legacy `backend/` and `frontend/` folders from uploads.
 
@@ -161,7 +227,10 @@ A successful deploy ends with `Aliased https://tmphotography.vercel.app`.
 |---|---|---|
 | `generate`, `templates` | 60 s | disabled (multer reads multipart) |
 | `shopify-images` | 60 s | JSON |
-| `history`, `history/[id]`, `history-add`, `templates/[id]`, `template-image`, `waitlist`, `admin` | 30 s | varies (multipart routes disable it) |
+| `history` | 60 s | JSON (thumbnail backfill can take a while) |
+| `history/[id]`, `history-add`, `templates/[id]`, `template-image`, `waitlist`, `admin` | 30 s | varies (multipart routes disable it) |
+
+Every save to a shared JSON file retries for at most **20 seconds** (§5), which stays inside the shortest 30 s limit.
 
 ### Function count — at the cap
 
@@ -169,26 +238,67 @@ There are **12** function files, which is Vercel Hobby's per-deployment limit:
 
 `admin`, `generate`, `history`, `history/[id]`, `history-add`, `login`, `models`, `shopify-images`, `template-image`, `templates`, `templates/[id]`, `waitlist`.
 
-A new endpoint therefore requires merging an existing one (e.g. folding `history-add` into `history`, or removing the debug `models` endpoint) or upgrading the plan.
+A new endpoint therefore requires merging an existing one (e.g. folding `history-add` into `history`, or removing the debug `models` endpoint) or upgrading the plan. Occasional maintenance actions are added to an existing endpoint instead (e.g. `POST /api/history` `{ action: "backfillThumbs" }`). Files in `api/_lib/` and `tests/` don't count.
+
+### Plan limits & the Fast Origin Transfer incident
+
+The project is on Vercel's free **Hobby** plan. Its most relevant allowance is **Fast Origin Transfer: 10 GB per 30 days** — every byte sent *into or out of* a serverless function (uploads, API responses). If exceeded, Vercel can pause the feature for the rest of the 30-day window, which would take the tool's backend down.
+
+In September 2026 the allowance hit 100%. Measured causes and fixes:
+
+| Cause | Before | After |
+|---|---|---|
+| Generated images returned to the browser as base64 inside the API response | ~0.9 MB per image (~4 GB/month) | images saved to R2 in the function and returned as links (~250 bytes per result) |
+| Retries re-uploaded the fabric and detail photos, returned the image, then uploaded it again on save | ~1.8 MB per retry | fabric/detail read from R2 by URL (`fabricUrl`/`detailUrl`); picking copies inside R2 (`sourceUrl`) |
+| Opening History downloaded the whole list uncompressed | 4.9 MB per open | gzip-compressed by the function (~0.5 MB), shorter retention (10 days) |
+
+The first upload of each new fabric still passes through a function (~0.6 MB), which is small by comparison.
+
+Two further notes about the Hobby plan: it is Vercel's *non-commercial* tier (their definition of commercial use is broad), and it has no pay-as-you-go overage. **Pro** ($20/month) removes the pause risk.
 
 ### Local development
 
 ```bash
 cd fabric-styler
+npm install
+npm test                    # automated tests (no network, no real storage)
 npx vite --port 3000        # also configured in .claude/launch.json as "fabric-vite"
 ```
 
 `vite.config.js` proxies every `/api` request to **production** (`https://tmphotography.vercel.app`).
 
-> ⚠️ **Local dev reads and writes live data.** Anything you generate, delete or restore from `localhost:3000` happens to the real History, templates and Waitlist. Deploy backend changes *before* exercising destructive features locally — a delete sent to an older production backend once soft-hid a staff member's entire history.
+> ⚠️ **Local dev reads and writes live data.** Anything you generate, delete or restore from `localhost:3000` happens to the real History, templates and Waitlist. Use it only for layout work; test behaviour on a **Preview** (staging) instead. A delete sent from local dev to an older production backend once soft-hid a staff member's entire history.
+
+### Automation bypass secret
+
+Scripts (and Claude) reach the protected Preview sites with Vercel's **Protection Bypass for Automation** secret (Vercel → Settings → Deployment Protection). It is stored only on the laptop, in `fabric-styler/.env.staging.local` — the file holds just the secret value, is covered by `.gitignore`, and must never be pasted into chat or committed. Send it as the header `x-vercel-protection-bypass`. To open a Preview in a browser without logging in to Vercel, add `?x-vercel-protection-bypass=<secret>&x-vercel-set-bypass-cookie=samesitenone` to the address once.
+
+### Automated tests
+
+`npm test` runs `node --test "tests/*.test.*"`:
+
+| File | What it proves |
+|---|---|
+| `tests/storage-concurrency.test.cjs` | 30 simultaneous History saves all land (with weak ETags, like real R2 for large files); a retried image replaces the old one for its template; an unreadable History file is never overwritten; simultaneous Waitlist adds, audit appends, template-library adds and active-set saves lose nothing |
+| `tests/saveQueue.test.mjs` | the browser save queue runs saves strictly one at a time and in order; a save that can't succeed doesn't block the next and is kept for Retry; Retry re-sends the same save |
+| `tests/helpers/fakeR2.cjs` | an in-memory stand-in for R2 that honours `If-Match` / `If-None-Match`, returns **weak** ETags for bodies over 1 KB, and adds random latency |
+
+Removing the weak-ETag fix makes three of the storage tests fail — the tests catch the bug that once broke live saving.
 
 `npm run dev` runs `vercel dev` instead (local functions), which needs the environment variables available locally; the sensitive ones can't be pulled from Vercel.
 
 ---
 
-## 5. Storage (Cloudflare R2)
+## 5. Storage & safe saving (Cloudflare R2)
 
-All persistent state lives in one R2 bucket. There is no database: each kind of state is a single JSON document, read, modified and written whole.
+All persistent state lives in R2. There is no database: each kind of state is a single JSON document, read, modified and written whole — safely, using the conditional-write check described below.
+
+| Bucket | Used by | Keys (env vars) |
+|---|---|---|
+| live bucket | Production (tmphotography.vercel.app) | Production-scoped `R2_*` variables |
+| `tm-ecom-staging` | every Preview build | Preview-scoped `R2_*` variables; its API token is limited to this bucket only (Object Read & Write) |
+
+The staging bucket has its own public `r2.dev` URL and the same CORS policy as the live bucket (needed for downloads and zips).
 
 - **Writes and JSON reads** use the authenticated S3 endpoint `https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com/{R2_BUCKET}`. Authenticated reads are never CDN-cached, so state is always fresh.
 - **Images** are served publicly from `R2_PUBLIC_BASE` (currently an `*.r2.dev` URL).
@@ -209,24 +319,66 @@ All persistent state lives in one R2 bucket. There is no database: each kind of 
 | `fs-history/{runId}-original.jpg` | Original uploaded photo | with its run |
 | `fs-history/{runId}-detail.jpg` | Close-up detail photo | with its run |
 | `fs-history/…{id}.thumb.jpg` | 320 px thumbnail (~10 KB) of a grid image (styled or flat), used by History, Shopify CSV and Admin grids | with its image |
-| `fs-candidates/{uuid}.jpg` | Retry variations not yet picked (picked ones are copied into `fs-history/`) | not cleaned up automatically |
+| `fs-candidates/{uuid}.jpg` | Retry variations (⟳, ⟳3, ✦) waiting to be picked; the picked one is copied into `fs-history/` | deleted **24 hours** after upload (swept whenever a retry runs) |
 | `waitlist/{user}/{id}.jpg`, `…/{id}-detail.jpg` | Waitlist photos | 7 days |
 | `shopify/{SKU}_{Template}.jpg` | Clean-named copies made by the Shopify export | permanent (overwritten per SKU/template) |
 
-Pruning is lazy: it happens when the relevant JSON is next read.
+Pruning is lazy. Reads simply leave out expired entries; the expired entries (and their image files) are actually removed the next time that file is **saved** — for History, that's the next generation, pick or delete. Retry candidates are swept by age during retries, up to 300 per sweep.
 
 ### Storage helpers (`api/_lib/storage.js`)
 
 | Function | Purpose |
 |---|---|
 | `putImage(key, buffer)` | Upload JPEG with `Cache-Control: public, max-age=31536000, immutable` |
-| `putJson(key, obj)` | Upload JSON state |
-| `getJson(key)` | Authenticated read; `null` if missing |
+| `putJson(key, obj)` | Unconditional JSON upload (used internally; writers use `updateJson`) |
+| `getJson(key)` | Authenticated read; `null` if missing — for display only |
+| `getJsonVersioned(key)` | Read JSON **with its ETag**; throws on read errors or unreadable JSON (never pretends a file is empty) |
+| `putJsonIfMatch(key, obj, {etag, exists})` | Conditional write: `If-Match` (or `If-None-Match: *` for a new file); `false` on 412 |
+| `updateJson(key, mutate)` | The safe read → change → conditional write loop (below) |
+| `getObjectBuffer(key)` | Read an image's bytes inside a function (e.g. a stored fabric photo for a retry, or to make a thumbnail) |
 | `copyObject(src, dest)` | Server-side copy (no bytes through the function) |
+| `listObjects(prefix)` | One page (≤1000) of keys with last-modified times (used by the candidate sweep) |
 | `deleteKeys(keys)` | Parallel best-effort deletes |
+| `isStoredImageKey(key)` | Allows only `fs-history/*.jpg` and `fs-candidates/*.jpg` to be referenced by URL from the browser |
 | `urlToKey(url)` / `publicUrl(key)` | Convert between public URLs and keys |
 
+Other storage-related modules: `api/_lib/thumbs.js` (makes 320 px thumbnails with `sharp`; `imageBlobUrls` lists an image's full + thumbnail files for deletion) and `api/_lib/respond.js` (`sendJson` — gzip-compresses large JSON responses).
+
 Image keys are never overwritten with different bytes (retries get a new id), which is what makes the year-long immutable cache safe.
+
+### Safe saving: why and how
+
+**The problem it solves.** Every save of History used to *read the whole file → change one entry → write the whole file back*, taking a few seconds for a multi-MB file. When two saves overlapped (typically several retry replacements picked in quick succession, or a pick landing while a batch generation saved), the one that finished second wrote back a copy that didn't contain the first one's change — so some picked replacements silently reverted to the old image.
+
+**Layer 1 — the server check (optimistic concurrency).** All shared JSON files are changed only through `updateJson(key, mutate)`:
+
+1. Read the file together with its **ETag** (R2's version ID for that exact content).
+2. Apply the change in memory (`mutate`).
+3. Write it back with `If-Match: <ETag>` — R2 accepts the write only if nobody has saved the file since step 1; otherwise it answers **412 Precondition Failed**.
+4. On 412: wait a random, growing delay ("full jitter", up to 1.5 s), re-read and re-apply the change. Keep going for up to **20 seconds**, then fail with *"Too many simultaneous saves … please try again"* — an honest error, never a silent loss.
+
+Details that matter:
+- **Weak ETags.** Cloudflare compresses larger responses and then labels the ETag weak (`W/"…"`). R2 only accepts the strong form in `If-Match`, so a weak tag made *every* conditional save fail — which is exactly what broke saving on the live site during the first rollout. `getJsonVersioned` strips the `W/` prefix; the value inside is the object's real ETag.
+- **Blob deletions happen only after the winning write**, using the list from the attempt that actually succeeded (the change function may run several times).
+- **Never overwrite what can't be read.** If a file exists but can't be parsed, the save is refused instead of replacing it with a fresh list.
+- **Switch.** `USE_CONDITIONAL_WRITES` in `api/_lib/storage.js` turns the check off (plain read-change-write) in an emergency.
+- **Throughput.** R2 allows roughly **one rewrite of the same file per second**. Measured on staging with a 2.5 MB file: 5 simultaneous saves all land (~10 s), 10 all land (~18 s), 15 → 14 land within the budget, 25 → 15. Beyond ~10 truly simultaneous saves, some return the "too many" error. Layer 2 keeps a single browser well below that.
+
+Files that use it: `fs-history.json` (`updateHistory`, which also prunes), `fs-audit.json` (`appendEvents`), `waitlist/{user}.json` (`updateWaitlist`), `fs-manifest.json` (`updateManifest`), `fs-active.json` (`setUserActive`, `removeFromAllActive`), `fs-caption-settings.json` (`writeCaptionSettings`).
+
+**Layer 2 — the browser save queue** (`src/utils/saveQueue.js`). Every History write from the app (picking a retry replacement on the Results panel or in History, deleting selected images, deleting a run, clearing History) goes into a queue that sends **one save at a time**, starting the next only when the previous has finished. So a person's own burst of picks never competes on the server; Layer 1 only has to handle the rarer clashes the browser can't see (another person saving, a second tab, a batch generation's own save).
+
+| Queue behaviour | Detail |
+|---|---|
+| Order | strict, first in first out |
+| Automatic retry | network errors, 5xx, 408 and 429 retry after **2 s, 5 s, 10 s**; if the browser is offline it first waits for the connection to return |
+| Not retried | answers like 400/403/404 (a retry wouldn't change them) |
+| Final failure | the save moves to a **not saved** list; the chosen image stays on its tile marked **⚠ Not saved** with **Retry**, and the header pill turns red with **Retry** — nothing is reverted or discarded silently |
+| Retry | re-sends the same save (the same stored image, copied server-side) — no regeneration, no cost |
+| Leaving the page | while anything is queued or not saved, closing or refreshing the tab triggers the browser's *"changes may not be saved"* warning |
+| Indicator | `SaveIndicator` pill, top centre, above every modal: **Saving N… keep this tab open** / **⚠ N not saved · Retry** |
+
+The queue lives in the open tab; it isn't shared between tabs or people.
 
 ### History of the storage layer
 
@@ -236,7 +388,9 @@ The app originally used Vercel Blob with versioned manifest filenames to dodge C
 
 ## 6. Environment variables
 
-Set in Vercel → Project → Settings → Environment Variables (Production). Sensitive values are write-only in Vercel and cannot be pulled locally.
+Set in Vercel → Project → Settings → Environment Variables. Each variable can have **different values per environment** (Production, Preview, Development) under the same name. Sensitive values are write-only in Vercel and cannot be pulled locally.
+
+> When adding a staging value, click **Add**, type the same key name, and tick **only Preview**. Never edit the existing Production rows to do this.
 
 | Variable | Required | Purpose |
 |---|---|---|
@@ -253,7 +407,19 @@ Set in Vercel → Project → Settings → Environment Variables (Production). S
 | `CAPTIONS_SHEET_TOKEN` | no | Shared secret the captions script checks |
 | `BLOB_READ_WRITE_TOKEN` | no | Legacy; only the migration script uses it |
 
-Changing a variable takes effect on the next deploy.
+**Which environments have which variables**
+
+| Variable | Production | Preview (staging) |
+|---|---|---|
+| `GEMINI_API_KEY` | ✓ | ✓ (same key — staging generations cost real money) |
+| `R2_ACCOUNT_ID` | ✓ | ✓ (same Cloudflare account) |
+| `R2_BUCKET`, `R2_PUBLIC_BASE` | live bucket | `tm-ecom-staging` and its r2.dev URL |
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | live token | a separate token limited to the staging bucket |
+| `ADMIN_PIN` | ✓ | ✓ (may differ from the live PIN) |
+| `ALLOWED_USERS`, `ADMIN_USERS` | ✓ | not set — the code defaults (`gaurav2811,bharatrm` / `gaurav2811`) apply |
+| `CAPTIONS_SHEET_WEBHOOK`, `CAPTIONS_SHEET_TOKEN` | ✓ | **deliberately not set**, so test runs never write captions into the real Google Sheet |
+
+Changing a variable takes effect only on the **next build** of that environment (push a commit to rebuild a Preview; see §4).
 
 ---
 
@@ -360,6 +526,8 @@ Input images cost roughly $0.0011 each, so attaching a detail photo adds about �
 | username | all | Who is signed in |
 | **Logout** | all | Signs out |
 
+A floating **save pill** appears at the top centre (above every screen and modal) whenever History changes are being saved — *"Saving 2… keep this tab open"* — and disappears when done. If a save still fails after automatic retries it turns red — *"⚠ 1 not saved"* with **Retry** (§5).
+
 A sticky **status bar** appears while generating: *"Generating fabric 2 of 5 — EC17010"*, a progress bar, and **Cancel after current**. Cancelling lets the current fabric finish and stops the rest.
 
 ### Active Templates panel
@@ -434,6 +602,7 @@ Above the images, when a caption exists: title, description preview, tags and pr
 Each result card:
 - Click to **enlarge**
 - **⟳** regenerate · **⟳3** three variations · **✦Pro** Pro model — all run in the background (§12)
+- After picking a replacement: *Saving…* while it's queued/saving; **⚠ Not saved** + **Retry** if it couldn't be saved
 - **⤓** download the single JPG
 - Shimmer placeholder while generating; errored cards show the message and a **⟳** that retries in place
 
@@ -459,9 +628,11 @@ Panel header: **⤓ Captions (CSV)** and **⤓ Download all**. Row header: **⟳
 3. Generates **all templates in parallel**. Each template fetches its image, picks the aspect ratio, composes the prompt and calls Gemini. One template failing or timing out affects only its own card.
 4. Waits for the caption and fills per-image alt texts from each template's pattern.
 5. Writes **audit events** (one per template, one for the caption).
-6. Saves to **History** (unless `skipHistory`): each generated image, the flat swatch, the **original** photo, the **detail** photo, the caption, and the typed facts. Runs are upserted by `runId`, and images by template, so retries replace in place.
-7. Appends the caption to the **Google Sheet**, if configured.
-8. Returns `{ results, caption }`.
+6. **Stores every generated image in R2 straight away** — under `fs-history/` for a normal run, or `fs-candidates/` for retry candidates (`skipHistory`) — so the response carries links, not image bytes.
+7. Saves to **History** (unless `skipHistory`): each generated image with a **320 px thumbnail**, the flat swatch (also with a thumbnail), the **original** photo, the **detail** photo, the caption, and the typed facts. Runs are upserted by `runId`, and images by template, so retries replace in place. The save uses the safe `updateHistory` (§5).
+8. For retry calls, **sweeps retry candidates older than 24 hours**.
+9. Appends the caption to the **Google Sheet**, if configured.
+10. Returns `{ results, caption, sources }`: each result's `imageDataUrl` is an R2 link; `sources` holds the stored original/detail links so later retries from the Results panel can reuse them instead of re-uploading.
 
 Every step after generation is best-effort: a History, audit or sheet failure never breaks the response.
 
@@ -559,17 +730,19 @@ Retries work the same way on the Results panel and in History, and never block t
    - Single / Pro: **Current** beside **New** — **Keep current** or **Use new image**
    - ×3: the **Current** image plus up to three variations — click one to keep
    - Closing with **×** keeps the result ready to reopen later
-4. Choosing swaps the tile at once and closes the modal; the image saves in the background (*Saving…*). If the save fails, the tile reverts and an error is shown.
+4. Choosing swaps the tile at once and closes the modal. The save joins the **save queue** (§5): the tile shows *Saving…* and the pill at the top shows *Saving N… keep this tab open*. You can pick several replacements in a row — they save one after another.
+5. If a save fails it is retried automatically (2 s, 5 s, 10 s). Only if it still fails does the tile show **⚠ Not saved** with **Retry** (the chosen image stays on the tile) and the pill turns red. **Retry** re-sends the same image; nothing is regenerated.
+6. After a refresh, History shows exactly what was saved.
 
-Candidates are generated with `skipHistory`, so nothing reaches History until you choose; the choice is saved via `/api/history-add`, which replaces that template's image in the run.
+Candidates are generated with `skipHistory` and stored under `fs-candidates/`; nothing reaches History until you choose. A candidate only shows as ready once its image has actually downloaded in the browser, so the Compare / Choose view never opens blank. The choice is saved via `/api/history-add` with `sourceUrl` — the server copies the candidate into `fs-history/` inside R2 and makes its thumbnail. Unpicked candidates are deleted after 24 hours.
 
-**Fabric source for retries**
-- Results panel: the in-memory fabric photo and detail photo.
+**Fabric source for retries** (sent as stored links, not re-uploaded)
+- Results panel: the original and detail photos stored by the first generation (`fabricUrl` / `detailUrl`). If none are stored yet (e.g. the fabric was re-cropped), the in-memory photos are uploaded instead.
 - History: the run's stored **flat swatch** (the square crop) plus the stored detail photo if present.
 
 Errored cards on the Results panel have no image to compare, so their **⟳** retries and replaces directly.
 
-Retries in progress live in the open screen; closing History discards any unfinished ones.
+Retries still *generating* live in the open screen; closing History discards unfinished ones. **Saves** that have already been picked continue in the queue even if History is closed.
 
 ---
 
@@ -599,11 +772,13 @@ Every generated product for **10 days**, newest first.
 
 - **Search SKU…** — filters runs; the counter shows *"8 of 546 runs"*
 - Counter: *"546 runs · 2684 images · kept 10 days"*
-- **Clear all** — admin: permanently deletes all history; staff: hides your own runs
+- **Clear all** — admin: permanently deletes your own runs (every user's, in the Admin combined view); staff: hides your own runs
 - **Select all / Clear** — image selection
 - **⤓ Captions (N)** — Captions CSV of every captioned run in view
 - **⤓ Download selected** — one zip, a folder per SKU
 - **Delete selected** — admin: permanent; staff: soft hide
+
+Deletes and clears go through the same **save queue** as picks (§5), so they never collide with a replacement that's still saving; the button shows its busy state until the queue reaches it.
 
 ### Each run
 
@@ -881,7 +1056,7 @@ Reserved template ids: `__flat__` (shown in grid), `__original__` and `__detail_
 
 ## 20. API reference
 
-All routes read the `x-fs-user` header. "Admin + PIN" also requires `x-fs-admin-pin`.
+All routes read the `x-fs-user` header. "Admin + PIN" also requires `x-fs-admin-pin`. Every endpoint that changes a JSON file uses the conditional-write loop (§5); if it gives up after 20 s it answers 500 with *"Too many simultaneous saves … please try again"*.
 
 | Method & path | Auth | Purpose |
 |---|---|---|
@@ -894,7 +1069,8 @@ All routes read the `x-fs-user` header. "Admin + PIN" also requires `x-fs-admin-
 | `POST /api/template-image` | user | Multipart `id`, `image` → replace a template's image (crop) |
 | `POST /api/generate` | — | Multipart `fabric`, optional `flatImage`, `detailImage`; fields `templateIds[]`, `runId`, `fabricName`, `action`, `model=pro`, `skipHistory`, `colour`, `adjective`, `fabricType`, `tags[]`; retries may send `fabricUrl` / `detailUrl` (stored R2 images) instead of files → `{ results, caption, sources }`. Each result’s `imageDataUrl` is an R2 URL (history key, or `fs-candidates/` when `skipHistory`), not base64, to keep Vercel Fast Origin Transfer low |
 | `POST /api/history-add` | user | Multipart `runId`, `fabricName`, `templateId`, `templateLabel`, and `image` (upload) **or** `sourceUrl` (a stored candidate, copied server-side) → `{ ok, image }` |
-| `GET /api/history` | user | Your own runs · `?scope=all` (admin + PIN): every user's runs incl. hidden |
+| `GET /api/history` | user | Your own runs, gzip-compressed · `?scope=all` (admin + PIN): every user's runs incl. hidden |
+| `POST /api/history` | user | `{ action: "backfillThumbs", limit? }` — create thumbnails for up to `limit` (≤80) grid images lacking one; repeat until `remaining` is 0 → `{ processed, failed, remaining }` |
 | `DELETE /api/history` | user | `{ urls: [] }` selective delete · `{ confirmClearAll: true }` clear all — limited to your own runs; with `?scope=all` (admin + PIN) applies across all users |
 | `PATCH /api/history` | admin + PIN | `{ restoreOwner, restoreDate? }` un-hide a user's runs and images; returns the all-users list |
 | `DELETE /api/history/:id` | user | Delete one of your runs (admin permanent, staff soft) · `?scope=all` (admin + PIN): any run |
@@ -979,6 +1155,12 @@ The Daily Checkout page uses its own simpler styling (Segoe UI, blue and green b
 | `loading="lazy"` on History and Waitlist images | Only on-screen images download |
 | Retries update the tile in place | No full-history reload after choosing (was a multi-second freeze) |
 | Fingerprinted assets cached for a year; `index.html` never cached | Fast loads, instant deploys |
+| **Thumbnails** (320 px, ~10 KB) in History, Shopify CSV picker and Admin grids | ~50× less image data when browsing; full-size only on enlarge/download/export. Before this, scrolling History queued dozens of 500 KB images and new retry images waited behind them (a pick screen once stayed blank ~2 minutes) |
+| Generated images returned as R2 links, not base64 | Tiny API responses; far less Vercel Fast Origin Transfer (§4) |
+| Retries reference stored photos by URL; picks copy inside R2 | No repeated uploads |
+| History JSON gzip-compressed by the function | 4.9 MB → ~0.5 MB per open (before the 10-day retention shrank it further) |
+| Retry candidates preloaded before showing *ready* | Compare / Choose opens with the image already loaded |
+| Browser save queue | One save at a time — no server-side contention from your own burst of picks |
 
 **Known bottleneck:** images are served from Cloudflare's `*.r2.dev` URL, which isn't CDN-cached and is rate-limited — the main reason a first History load can take a few seconds. The fix is binding a custom domain to the bucket, but that requires the domain's DNS on Cloudflare; `tmangharam.com` is registered with **eNom**, and moving its nameservers would affect the live store, so it hasn't been done.
 
@@ -1003,44 +1185,82 @@ The Daily Checkout page uses its own simpler styling (Segoe UI, blue and green b
 | Tag fields per product | 3 manual (plus unlimited from AI) |
 | SEO description | 320 characters |
 | r2.dev burst | ~816 image fetches, then `429`, recovers in ~20 s |
+| Vercel Fast Origin Transfer (Hobby) | 10 GB per 30 days |
+| Rewrites of one R2 file | ~1 per second (R2) — ~10 truly simultaneous History saves is the practical ceiling |
+| Conditional save retry budget | 20 s per save (then "too many simultaneous saves") |
+| Browser save queue retries | 3 automatic (2 s, 5 s, 10 s), then **Not saved · Retry** |
+| Retry candidates (`fs-candidates/`) | deleted after 24 h; ≤300 per sweep |
+| Thumbnails | 320 px on the short side, JPEG q72 (~10 KB) |
+| Thumbnail backfill | ≤80 images per call |
 
 ---
 
 ## 24. Known limitations & risks
 
 1. **Identity is trust-based.** Anyone who knows a username can act as that user, and `/api/generate` doesn't reject requests without a valid username. Admin data is protected by the PIN only.
-2. **Last write wins.** Each state file is read, modified and written whole. Two writes to the same file at the same moment (e.g. two people editing History simultaneously) can lose one change.
-3. **Local development touches production data** (§4).
+2. **One shared file per kind of state.** Simultaneous saves no longer overwrite each other (§5), but R2 allows only about one rewrite of a file per second, so a very large burst of truly simultaneous saves (more than ~10, e.g. several people picking at once) can make some fail with a visible error. The browser queue keeps one person's saves well below that. Splitting History into per-run files would remove the ceiling if it's ever needed.
+3. **Local development touches production data** (§4) — test on a Preview instead.
 4. **At the function cap** — a new endpoint needs consolidation or a plan upgrade.
 5. **Uncached `r2.dev` delivery** makes first History loads slow (§22).
 6. **Originals and detail photos exist only for newer runs.** Older runs can't show ◉ Original or retry with the close-up; Gemini doesn't retain inputs, so they can't be recovered.
 7. **History retries use the flat swatch**, a square crop, rather than the full original photo.
 8. **Captions only on the first generate**, and only when facts are typed.
 9. **The fabric queue lives in the browser tab** — reloading clears unsaved work (finished runs are in History).
-10. **In-progress retries are lost** if History is closed before choosing.
+10. **Generating retries are lost** if History is closed before choosing (picked saves continue in the queue). The save queue itself lives in the tab — closing the tab while saves are pending loses them (the browser warns first).
 11. **Apps Script code isn't version-controlled** here; it lives only in Google.
 12. **AI output is stochastic** — the same inputs can give different images; retries and Pro exist for this.
 13. **Estimated costs only** — the real Google balance isn't available by API.
 14. **Soft-deleted history is easy to trigger in bulk** — the cause of a stranded batch that had to be restored by date.
 15. **`GET /api/models` is unauthenticated** (lists model names; doesn't expose the key).
+16. **Hobby plan** — 10 GB/month Fast Origin Transfer with a pause (not a bill) when exceeded, and a non-commercial-use clause (§4).
+17. **Staging isn't a copy of live data.** It starts empty; templates must be copied across, and it shares the real Gemini key (staging generations cost money).
+18. **Preview automation secret** is a local file on one laptop (`.env.staging.local`); if lost, create a new one in Vercel.
+19. **Vercel "Redeploy" defaults to Production** — see §4; rebuild staging with a push instead.
+20. **Candidate sweep only runs during retries.** If no one retries for a while, unpicked candidates wait until the next retry to be deleted.
 
 ---
 
 ## 25. Operations runbook
 
-### Deploy a change
+### Release a change
+Follow the **release checklist** in §4: branch → `npm test` + `npm run build` → push the branch → check the Preview on staging → approve → merge into `main` at a quiet moment → `git push origin main` → verify live → ask users to refresh. You can simply ask Claude: *"push to main"* once staging is approved.
+
+### Roll back a bad release
+Vercel → **Deployments** → the previous **Production** deployment → **⋯ → Promote**. Live again within seconds. Then fix the problem on a branch and release normally.
+
+### Rebuild staging (e.g. after changing Preview variables)
+Push a commit to the branch — an empty one works:
 ```bash
-cd fabric-styler
-npm run build
-vercel --prod --yes
+git commit --allow-empty -m "Rebuild staging"
 ```
-Confirm `Aliased https://tmphotography.vercel.app`.
+```bash
+git push
+```
+Don't use the Redeploy button (it defaults to Production).
+
+### Copy live templates to staging
+Read the live templates (`GET /api/templates` as a user on the live site), download each template image, then on the Preview: `POST /api/templates` (multipart `image`, `label`, with the bypass header) and `PATCH /api/templates/:id` with the live `prompt`, `description` and `altPattern` so they're exact copies. Live data is only read. Each upload makes one small Gemini call to describe the scene. (Claude can do this on request.)
+
+### Emergency: turn off the conditional-write check
+If saves start failing with "too many simultaneous saves" or 412-related errors after an R2 change: set `USE_CONDITIONAL_WRITES = false` in `api/_lib/storage.js` on a branch, verify on staging, release. Saves then behave like the old read-change-write (with the old risk of lost updates) until fixed.
+
+### Backfill thumbnails
+Only needed if images were saved without thumbnails (e.g. after restoring old data). Call `POST /api/history` `{ "action": "backfillThumbs", "limit": 60 }` with an `x-fs-user` header repeatedly until `remaining` is 0 (~60 images per 13 s).
+
+### Rotate the staging R2 key
+Cloudflare → R2 → **Manage API tokens** → delete and recreate `tm-ecom-staging` (Object Read & Write, *specific bucket* `tm-ecom-staging`) → in Vercel edit the **Preview** rows of `R2_ACCESS_KEY_ID` (Access Key ID) and `R2_SECRET_ACCESS_KEY` (**Secret Access Key**, not the "Token value") → push a commit to rebuild staging.
+
+### Run the automated tests
+```bash
+npm test
+```
+All must pass before any push to `main`.
 
 ### Add or remove a team member
-Edit `ALLOWED_USERS` (and `ADMIN_USERS` for admins) in Vercel, then redeploy. Usernames are lowercase.
+Edit `ALLOWED_USERS` (and `ADMIN_USERS` for admins) in Vercel, then rebuild Production. Usernames are lowercase.
 
 ### Change the admin PIN
-Update `ADMIN_PIN` in Vercel and redeploy.
+Update `ADMIN_PIN` in Vercel (Production row) and rebuild Production.
 
 ### Improve a template that keeps needing retries
 Admin → **Template health** to find it → Library → **Edit** its prompt, or **Crop** the scene.
@@ -1061,7 +1281,7 @@ Header → **Shopify CSV** → pick → group & price → download → import in
 Edit in the Apps Script project → save → for the webhook, **Deploy → Manage deployments → Edit → New version**. For the weekly report, run `sendTestReport` to check; `setupWeeklyTrigger` reinstalls the schedule.
 
 ### Rotate R2 or Gemini keys
-Replace the variable in Vercel and redeploy. For the weekly report, also update its `GEMINI_API_KEY` Script Property.
+Replace the variable in Vercel (the right environment row), then rebuild that environment: push a commit to `main` for Production (or Promote the current deployment to rebuild with new variables), push to a branch for Preview. For the weekly report, also update its `GEMINI_API_KEY` Script Property.
 
 ---
 
@@ -1069,13 +1289,25 @@ Replace the variable in Vercel and redeploy. For the weekly report, also update 
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Deploy "succeeds" but the site doesn't change | Deployed from the wrong folder | `cd fabric-styler` and redeploy |
+| Pushed to `main` but the site didn't change | Build still running, failed, or the push went to another branch | Vercel → Deployments: look for a **Production** build; check `git status` shows `main...origin/main` |
+| Pushed a branch but no Preview appeared | Vercel wasn't connected to GitHub when it was pushed | Settings → Git shows the repo; push a new (even empty) commit |
+| Red pill **⚠ N not saved** / tile **⚠ Not saved** | A save failed after 3 automatic retries (offline, server error, or a very large burst of simultaneous saves) | Click **Retry** (pill or tile); no regeneration needed |
+| Error *"Too many simultaneous saves to fs-history.json"* | More than ~10 truly simultaneous saves (e.g. several people/tabs at once) | Retry a moment later |
+| Browser warns *"changes may not be saved"* when closing | Saves still queued or not saved | Wait for the pill to disappear, or click Retry |
+| A picked replacement shows the old image after refresh | A save didn't complete (tab closed mid-save) — or, before Sept 2026, lost to overlapping saves | Pick again; watch the pill finish |
+| Every save fails with 412 after an R2 change | Conditional writes rejected (e.g. ETag format change) | Emergency switch in §25; investigate on staging |
+| Staging: History/Templates error *"R2 get failed (403)"*, *SignatureDoesNotMatch* | Wrong Preview R2 keys (often the "Token value" pasted as the secret) | §25 *Rotate the staging R2 key* |
+| Staging site asks for a Vercel login | Preview protection (expected) | Log in to Vercel, or use the bypass secret |
+| Vercel's Redeploy dialog shows **Production** | Its default | Cancel; rebuild staging by pushing a commit |
+| Terminal: *"The token '&&' is not a valid statement separator"* | Windows PowerShell 5.1 | Run the commands one per line |
+| Email: *Fast Origin Transfer at 100%* | Too much data through functions | Check §4 measures are live; consider Pro |
 | *Failed to fetch* when downloading | Cached non-CORS image reused | Already handled by cache-busting; hard refresh |
 | A card errors after ~60 s | Gemini timeout | ⟳ on that card, or Retry failed |
 | Result keeps the template's pattern, only recoloured | Model slipped past the guard | Retry, ×3 or Pro; tighten that template's prompt |
 | Embroidery comes out looking printed | No close-up | Attach **＋ Detail** and regenerate |
 | Staff member sees "0 images" on runs | Images soft-hidden | Admin → Restore hidden history (by date) |
-| History slow to open | `r2.dev` delivery | Search by SKU to narrow; repeat opens are cached |
+| History slow to open | `r2.dev` delivery (thumbnails make this much lighter) | Search by SKU to narrow; repeat opens are cached |
+| Retry Compare/Choose opened blank | (Fixed) candidates now preload before showing ready | Wait a moment; if persistent, check the network |
 | Upload rejected | File over the size limit or wrong type | Use jpg/png/webp; the app compresses automatically |
 | "Maximum 5 templates" | Active set full | Deactivate one first |
 | Some Shopify images missing after import | Throttling on very large imports | Split into files of ≤100 products and re-import |
@@ -1094,41 +1326,53 @@ fabric-styler/
 ├── PROJECT_OVERVIEW.txt        older overview (out of date)
 ├── README.md                   original prototype readme (out of date)
 ├── index.html                  app shell, fonts, favicon, title
-├── package.json                dependencies and scripts
+├── package.json                dependencies and scripts (build, test)
+├── package-lock.json           exact dependency versions
 ├── vite.config.js              React plugin; /api proxy → production
 ├── vercel.json                 build output and cache headers
 ├── .vercelignore               excludes backend/ and frontend/
+├── .gitignore                  what never goes to GitHub (secrets, builds, legacy)
+├── .gitattributes              LF line endings
 ├── .claude/launch.json         local dev server config (port 3000)
+├── .claude/settings.local.json Claude permission to git push (local only, not committed)
+├── .env.staging.local          Preview bypass secret (local only, not committed)
+│
+├── tests/                      npm test
+│   ├── storage-concurrency.test.cjs   simultaneous saves never lose data
+│   ├── saveQueue.test.mjs             browser save queue behaviour
+│   └── helpers/fakeR2.cjs             in-memory R2 with ETags (weak for >1 KB)
 │
 ├── api/                        Vercel serverless functions (12)
 │   ├── login.js                username check
 │   ├── templates.js            list, upload, reorder, backfill alt
 │   ├── templates/[id].js       edit, activate, delete
 │   ├── template-image.js       replace image after crop
-│   ├── generate.js             image generation, captions, history, audit, sheet
-│   ├── history.js              list, selective delete, clear all, restore
+│   ├── generate.js             image generation, captions, history, audit, sheet; stores images in R2, returns links; candidate sweep
+│   ├── history.js              list (gzip), selective delete, clear all, restore, thumbnail backfill
 │   ├── history/[id].js         delete one run
-│   ├── history-add.js          save a chosen retry
+│   ├── history-add.js          save a chosen retry (upload or server-side copy of a candidate) + thumbnail
 │   ├── waitlist.js             staging area
 │   ├── shopify-images.js       clean-named image copies
 │   ├── admin.js                dashboard data, caption settings
 │   ├── models.js               debug model list
 │   └── _lib/                   shared server code
-│       ├── storage.js          R2 client
+│       ├── storage.js          R2 client; conditional writes (updateJson), weak-ETag fix, listing
+│       ├── thumbs.js           320 px thumbnails (sharp); blob lists for deletes
+│       ├── respond.js          gzip JSON responses
 │       ├── auth.js             usernames, roles, admin PIN
-│       ├── manifest.js         template library
+│       ├── manifest.js         template library (updateManifest)
 │       ├── active.js           per-user active sets
 │       ├── prompts.js          prompt builder, guard, detail clause
 │       ├── captions.js         caption settings, generation, tags, description
 │       ├── alttext.js          alt pattern generation and filling
-│       ├── history.js          history storage, pruning, visibility
-│       ├── audit.js            event log
-│       ├── waitlist.js         waitlist storage
+│       ├── history.js          history read, updateHistory (safe save + pruning), visibility
+│       ├── audit.js            event log (safe appends)
+│       ├── waitlist.js         waitlist storage (safe updates)
 │       └── sheets.js           captions sheet webhook
 │
 ├── src/                        React app
 │   ├── main.jsx                entry
-│   ├── App.jsx                 state, generation, retries, header, modals
+│   ├── App.jsx                 state, generation, retries, header, modals, save pill
 │   ├── index.css               design system and all styles
 │   ├── components/
 │   │   ├── Login.jsx, Brand.jsx, StatusBar.jsx
@@ -1145,6 +1389,7 @@ fabric-styler/
 │   │   ├── HistoryModal.jsx
 │   │   ├── ShopifyExportModal.jsx
 │   │   ├── AdminDashboard.jsx
+│   │   ├── SaveIndicator.jsx       "Saving N…" / "N not saved · Retry" pill
 │   │   └── FabricUploader.jsx, ResultsGrid.jsx   unused legacy
 │   └── utils/
 │       ├── api.js              identity header, admin PIN
@@ -1153,6 +1398,8 @@ fabric-styler/
 │       ├── cropImage.js        flat swatch, crop, rotate
 │       ├── dataUrlToBlob.js
 │       ├── zip.js              downloads and zips
+│       ├── saveQueue.js        one-at-a-time History save queue, auto-retry, tab-close warning
+│       ├── preload.js          wait for an image to download before showing it
 │       ├── captionCsv.js       captions CSV, CSV helpers
 │       └── shopifyCsv.js       Shopify CSV builder and rules
 │
@@ -1196,3 +1443,12 @@ In roughly the order they were built:
 22. Daily checkout: cancelled orders, amounts, order numbers
 23. Non-blocking background retries with Compare / Choose, on both screens
 24. Shopify CSV export: product picker, colour-variant grouping, half pricing, clean image filenames, full field rules
+25. Per-user History; combined all-users History only in the PIN-locked Admin dashboard
+26. Fast Origin Transfer reductions: images returned as R2 links, retries by stored URL, server-side copies on pick, gzip History
+27. History retention cut from 30 to 10 days
+28. Thumbnails for History, Shopify picker and Admin grids (existing images backfilled); retry candidates preloaded before *ready*
+29. Automatic cleanup of unpicked retry candidates after 24 hours
+30. Git version control, private GitHub repo, Vercel Git integration, separate staging bucket and Preview environment, release checklist
+31. Safe saving: conditional writes (ETag / If-Match) for every shared JSON file, including the weak-ETag fix
+32. Browser save queue with the *Saving…* pill, automatic retries, **Not saved · Retry**, and tab-close warning
+33. Automated tests (`npm test`) for concurrent saving and the save queue
