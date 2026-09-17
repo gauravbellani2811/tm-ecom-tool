@@ -1,0 +1,18 @@
+# Dependencies and build output (recreated by `npm install` / `npm run build`)
+node_modules/
+dist/
+
+# Vercel CLI link and pulled settings
+.vercel
+
+# Secrets — never commit. Real values live in Vercel → Settings → Environment Variables.
+.env*
+
+# Legacy pre-Vercel app (not used by the live site)
+backend/
+frontend/
+
+# Local editor / OS noise
+.DS_Store
+Thumbs.db
+*.log

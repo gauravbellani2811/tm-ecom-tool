@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daily Checkout Sheet</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7f6;
+            color: #333;
+            line-height: 1.6;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: auto;
+            background: #fff;
+            padding: 20px 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        h2 {
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 20px;
+        }
+        fieldset {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+            background-color: #fafafa;
+        }
+        legend {
+            font-weight: bold;
+            color: #2c3e50;
+            background: #fff;
+            padding: 0 10px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        input[type="text"],
+        input[type="number"],
+        input[type="date"],
+        textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        textarea {
+            resize: vertical;
+        }
+        #other_work::placeholder {
+            font-weight: 700;
+            color: #555;
+        }
+        button.add-btn {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }
+        button.add-btn:hover {
+            background-color: #2980b9;
+        }
+        .dynamic-row {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+            align-items: center;
+            background: #fff;
+            padding: 10px;
+            border: 1px dashed #ccc;
+        }
+        .dynamic-row input {
+            margin-bottom: 0;
+        }
+        .remove-btn {
+            background-color: #e74c3c;
+            color: white;
+            border: none;
+            padding: 8px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .remove-btn:hover {
+            background-color: #c0392b;
+        }
+        .submit-btn {
+            display: block;
+            width: 100%;
+            background-color: #2ecc71;
+            color: white;
+            border: none;
+            padding: 15px;
+            font-size: 1.2em;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 20px;
+        }
+        .submit-btn:hover {
+            background-color: #27ae60;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Daily Checkout Sheet</h2>
+    <form action="#" method="POST">
+
+        <fieldset>
+            <legend>General Information</legend>
+            <div class="form-group">
+                <label for="date">Date:</label>
+                <input type="date" id="date" name="date" required>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Order Fulfillment</legend>
+            <div class="form-group">
+                <label for="orders_received">Number of Orders Received Today:</label>
+                <input type="number" id="orders_received" name="orders_received" min="0" required>
+            </div>
+            <div class="form-group">
+                <label for="orders_packed">Number of Orders Packed & Ready for Dispatch:</label>
+                <input type="number" id="orders_packed" name="orders_packed" min="0" required>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Returns</legend>
+            <div id="returns_container">
+                </div>
+            <button type="button" class="add-btn" onclick="addReturnRow()">+ Add a Return Record</button>
+        </fieldset>
+
+        <fieldset>
+            <legend>Refunds</legend>
+            <div id="refunds_container">
+                </div>
+            <button type="button" class="add-btn" onclick="addRefundRow()">+ Add a Refund Record</button>
+        </fieldset>
+
+        <fieldset>
+            <legend>Cancelled Orders</legend>
+            <div id="cancellations_container">
+                </div>
+            <button type="button" class="add-btn" onclick="addCancellationRow()">+ Add a Cancelled Order</button>
+        </fieldset>
+
+        <fieldset>
+            <legend>Production Line Pipeline</legend>
+            <div class="form-group">
+                <label for="photos_taken">1. Fabric Images Taken:</label>
+                <input type="number" id="photos_taken" name="photos_taken" min="0" required>
+            </div>
+            <div class="form-group">
+                <label for="products_generated">2. Products Generated on Tool (Processed/Edited):</label>
+                <input type="number" id="products_generated" name="products_generated" min="0" required>
+            </div>
+            <div class="form-group">
+                <label for="products_uploaded">3. Products Uploaded to Store:</label>
+                <input type="number" id="products_uploaded" name="products_uploaded" min="0" required>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Stock Reconciliation</legend>
+            <div class="form-group">
+                <label>Online Stock Reconciliation Done?</label>
+                <div style="display: flex; gap: 24px; align-items: center;">
+                    <label style="display: flex; align-items: center; gap: 6px; font-weight: normal; margin: 0;">
+                        <input type="radio" name="stock_reconciliation" value="Yes" style="width: auto; margin: 0;"> Yes
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 6px; font-weight: normal; margin: 0;">
+                        <input type="radio" name="stock_reconciliation" value="No" style="width: auto; margin: 0;" checked> No
+                    </label>
+                </div>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>Additional Work</legend>
+            <div class="form-group">
+                <label for="other_work">Other work done today, not in scope mentioned above</label>
+                <textarea id="other_work" name="other_work" rows="4" placeholder="Inventory related tasks only"></textarea>
+            </div>
+        </fieldset>
+
+        <button type="submit" class="submit-btn">Submit Daily Report</button>
+    </form>
+</div>
+
+<script>
+    // Set today's date automatically
+    document.getElementById('date').valueAsDate = new Date();
+
+    function addReturnRow() {
+        const container = document.getElementById('returns_container');
+        const row = document.createElement('div');
+        row.className = 'dynamic-row return-row';
+        row.innerHTML = `
+            <input type="text" class="ret-id" placeholder="Order Number" required style="flex: 1;">
+            <input type="number" class="ret-amount" placeholder="Amount (₹)" min="0" style="flex: 1;">
+            <input type="text" class="ret-reason" placeholder="Reason for Return" required style="flex: 2;">
+            <button type="button" class="remove-btn" onclick="this.parentElement.remove()">X</button>
+        `;
+        container.appendChild(row);
+    }
+
+    function addRefundRow() {
+        const container = document.getElementById('refunds_container');
+        const row = document.createElement('div');
+        row.className = 'dynamic-row refund-row';
+        row.innerHTML = `
+            <input type="text" class="ref-order" placeholder="Order Number" required style="flex: 1;">
+            <input type="number" class="ref-amount" placeholder="Amount (₹)" min="0" style="flex: 1;">
+            <input type="text" class="ref-reason" placeholder="Reason for Refund" required style="flex: 2;">
+            <button type="button" class="remove-btn" onclick="this.parentElement.remove()">X</button>
+        `;
+        container.appendChild(row);
+    }
+
+    function addCancellationRow() {
+        const container = document.getElementById('cancellations_container');
+        const row = document.createElement('div');
+        row.className = 'dynamic-row cancellation-row';
+        row.innerHTML = `
+            <input type="text" class="can-order" placeholder="Order Number" required style="flex: 1;">
+            <input type="number" class="can-amount" placeholder="Amount (₹)" min="0" style="flex: 1;">
+            <input type="text" class="can-reason" placeholder="Reason for Cancellation" required style="flex: 2;">
+            <button type="button" class="remove-btn" onclick="this.parentElement.remove()">X</button>
+        `;
+        container.appendChild(row);
+    }
+
+    // Intercept the form submission to send to Google Sheets
+    const form = document.querySelector('form');
+    const submitBtn = document.querySelector('.submit-btn');
+
+    form.addEventListener('submit', function(e) {
+        e.preventDefault(); // Prevent normal page reload
+
+        // Change button text so staff knows it's working
+        submitBtn.innerText = "Submitting...";
+        submitBtn.style.backgroundColor = "#95a5a6";
+        submitBtn.disabled = true;
+
+        // 1. Google Apps Script Web App URL
+        const scriptURL = 'https://script.google.com/macros/s/AKfycbwwxJpRpp1qs_VUFDAqFOZ_N55lKRcvyE7GqYfrC_LiPpmMHX3BkYyOjs5Jsxavzb31/exec';
+
+        // 2. Gather Returns Data (order, amount, reason). `id` kept as an alias so an
+        //    older webhook that reads `.id` still gets the order number.
+        const returnsData = [];
+        document.querySelectorAll('.return-row').forEach(row => {
+            const order = row.querySelector('.ret-id').value;
+            returnsData.push({
+                order: order, id: order,
+                amount: row.querySelector('.ret-amount').value,
+                reason: row.querySelector('.ret-reason').value
+            });
+        });
+
+        // 3. Gather Refunds Data (order, amount, reason). `sku` kept as an alias for
+        //    backward compatibility with the current webhook.
+        const refundsData = [];
+        document.querySelectorAll('.refund-row').forEach(row => {
+            const order = row.querySelector('.ref-order').value;
+            refundsData.push({
+                order: order, sku: order,
+                amount: row.querySelector('.ref-amount').value,
+                reason: row.querySelector('.ref-reason').value
+            });
+        });
+
+        // 3b. Gather Cancelled Orders Data
+        const cancellationsData = [];
+        document.querySelectorAll('.cancellation-row').forEach(row => {
+            cancellationsData.push({
+                order: row.querySelector('.can-order').value,
+                amount: row.querySelector('.can-amount').value,
+                reason: row.querySelector('.can-reason').value
+            });
+        });
+
+        // 4. Package all data
+        const payload = {
+            date: document.getElementById('date').value,
+            orders_received: document.getElementById('orders_received').value,
+            orders_packed: document.getElementById('orders_packed').value,
+            photos_taken: document.getElementById('photos_taken').value,
+            products_generated: document.getElementById('products_generated').value,
+            products_uploaded: document.getElementById('products_uploaded').value,
+            stock_reconciliation: (document.querySelector('input[name="stock_reconciliation"]:checked') || {}).value || "No",
+            other_work: document.getElementById('other_work').value,
+            returns: returnsData,
+            refunds: refundsData,
+            cancellations: cancellationsData
+        };
+
+        // 5. Send to Google Sheets (with no-cors fix applied)
+        fetch(scriptURL, {
+            method: 'POST',
+            mode: 'no-cors',
+            body: JSON.stringify(payload),
+            headers: {
+                'Content-Type': 'text/plain;charset=utf-8',
+            }
+        })
+        .then(() => {
+            alert("Success! Daily report submitted to Google Sheets.");
+            form.reset(); // Clear form for next time
+            document.getElementById('returns_container').innerHTML = ''; // Clear dynamic rows
+            document.getElementById('refunds_container').innerHTML = '';
+            document.getElementById('cancellations_container').innerHTML = '';
+            document.getElementById('date').valueAsDate = new Date(); // Reset date
+        })
+        .catch(error => {
+            console.error('Error!', error);
+            alert("Something went wrong. Please check your internet connection.");
+        })
+        .finally(() => {
+            // Restore button
+            submitBtn.innerText = "Submit Daily Report";
+            submitBtn.style.backgroundColor = "#2ecc71";
+            submitBtn.disabled = false;
+        });
+    });
+</script>
+
+</body>
+</html>

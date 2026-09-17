@@ -1,0 +1,276 @@
+================================================================================
+FABRIC STYLER — HOW THE PROJECT CURRENTLY WORKS
+================================================================================
+Live site: https://tmphotography.vercel.app
+Vercel project: tm_photography (account: gaurav-tm-projects)
+Last updated: this document reflects the current deployed code.
+
+
+--------------------------------------------------------------------------------
+1. WHAT IT DOES
+--------------------------------------------------------------------------------
+You save a handful of "template scenes" — product photos showing a fabric
+draped / folded / rolled in a setting (e.g. fabric on a wooden table, draped on
+a mannequin, swirled flatlay). Then you upload your own flat fabric photos, and
+the app uses Google's Gemini image model to re-skin the textile in each template
+scene with YOUR fabric's print — producing photorealistic product shots in bulk.
+
+Core loop: pick up to 5 active templates -> drop in N fabric photos ->
+"Generate" -> get N x (up-to-5) styled images -> download individually,
+per-fabric (ZIP), or all at once (ZIP).
+
+
+--------------------------------------------------------------------------------
+2. STACK & ARCHITECTURE
+--------------------------------------------------------------------------------
+Frontend : React 18 + Vite 5 (single-page app, built to static dist/)
+Backend  : Vercel serverless functions (Node.js) under api/
+AI       : Google @google/genai SDK
+           - gemini-3.1-flash-image  -> image generation
+           - gemini-2.5-flash        -> text scene-analysis
+Storage  : Vercel Blob (Vercel's filesystem is ephemeral, so ALL persistence
+           is in Blob). There is NO database.
+Other    : multer (file uploads), jszip (client-side ZIP), uuid
+
+Request flow:
+
+   Browser (React)  --->  /api/templates       (list / create templates)
+                    --->  /api/templates/[id]   (PATCH activate-edit, DELETE)
+                    --->  /api/generate         (run a fabric vs templates)
+                              |
+                              +--> Vercel Blob   (manifest JSON + template imgs)
+                              +--> Gemini API
+
+
+--------------------------------------------------------------------------------
+3. DATA MODEL
+--------------------------------------------------------------------------------
+The entire template catalog is ONE JSON manifest file in Blob. Each entry:
+
+   { id, url, label, description, prompt, active }
+
+   id          - uuid
+   url         - template image in Blob (fs-templates/{id}.jpg)
+   label       - display name you typed
+   description - auto-generated scene description (gemini-2.5-flash)
+   prompt      - the FULL editable text sent to Gemini (built from description
+                 at upload time; you can edit it later)
+   active      - whether it's in the live set used for generation
+                 (MAX 5 ACTIVE at once)
+
+Fabrics are NEVER persisted — they live only in browser state during a session:
+
+   { id, file (compressed File), previewUrl, name, status, results: [...] }
+
+   status flows: pending -> generating -> done | error
+   results[]  : one entry per active template, each:
+                { templateId, templateLabel, imageDataUrl? , error?, pending? }
+
+
+--------------------------------------------------------------------------------
+4. BACKEND ENDPOINTS
+--------------------------------------------------------------------------------
+
+api/_lib/manifest.js  (the storage layer — two pieces of hard-won logic)
+
+  * Versioned writes (stale-read fix):
+    Each writeManifest writes a NEW uniquely-named file
+    (fs-manifest-<timestamp>-<rand>.json) and deletes the older ones.
+    readManifest lists them and reads the newest.
+    WHY: Vercel Blob's CDN caches content BY PATHNAME and ignores query
+    strings, so a single overwritten file kept serving stale data (deletions
+    "reappeared", changes needed multiple refreshes). Unique filenames are
+    never cached, so reads are always fresh.
+
+  * Deterministic active-state:
+    normalizeActive() gives every entry an explicit `active` boolean and
+    persists it once, so toggling one template can never non-deterministically
+    flip another. MAX_ACTIVE = 5 is defined here and reused everywhere.
+
+api/templates.js
+  * GET  -> returns the full manifest (array of templates).
+  * POST -> receives a compressed image + label:
+            1. stores the image in Blob (fs-templates/{id}.jpg)
+            2. describeScene() (gemini-2.5-flash) writes a scene description
+               (props, surface, lighting, camera angle, how fabric is folded —
+               deliberately NOT the fabric's pattern/color, since that's swapped)
+            3. buildDefaultPrompt(description) composes the stored prompt
+            4. auto-activates if fewer than 5 are currently active
+            5. writes the manifest, returns it
+  * Config: bodyParser disabled (multer handles it), maxDuration 60s.
+
+api/templates/[id].js
+  * PATCH -> update label / prompt / description, or toggle `active`.
+             Enforces the max-5-active rule (rejects a 6th).
+  * DELETE -> removes the entry AND deletes its Blob image.
+  * Returns the updated manifest.
+
+api/generate.js   (the heart of generation)
+  * POST receives ONE fabric file + a list of templateIds.
+  * For each template, IN PARALLEL (Promise.all):
+       - fetch the template image from Blob
+       - build the prompt: composePrompt(tpl.prompt || buildDefaultPrompt(...))
+       - call Gemini with TWO images + the text prompt
+  * callGemini() sends:
+       IMAGE 1 = template scene
+       IMAGE 2 = uploaded fabric
+       + the text prompt
+    with a hard 60s timeout per call. Returns a data:image/jpeg base64 URL.
+  * Per-template error isolation: one template failing (e.g. a 60s timeout)
+    does NOT kill the others — it comes back as { error } for just that card.
+  * Returns { results: [...] } in the same order as the templateIds sent.
+  * Config: bodyParser disabled, maxDuration 60s.
+
+api/_lib/prompts.js   (prompt engineering — accuracy)
+  * buildDefaultPrompt(description) -> the per-template scene instruction.
+  * FABRIC_TRANSFER_GUARD -> a fixed block appended to EVERY generation that:
+       - labels IMAGE 1 = scene template, IMAGE 2 = source fabric
+       - says IMAGE 1's textile is a stand-in: discard its pattern AND colors
+       - explicitly forbids the common failure ("do NOT keep IMAGE 1's pattern
+         and merely tint it toward IMAGE 2's colors")
+  * composePrompt(scenePrompt) -> scenePrompt + the guard.
+    Applied at GENERATION time, so all existing templates benefit without
+    being re-saved.
+
+
+--------------------------------------------------------------------------------
+5. FRONTEND — COMPONENTS & FLOW
+--------------------------------------------------------------------------------
+App.jsx  (the conductor)
+  Holds all state: templates, fabrics queue, generating flags, which template
+  is being edited, whether the library modal is open.
+  Key functions:
+    - loadTemplates()          : GET /api/templates on mount
+    - generateForFabric()      : POST /api/generate for ALL active templates
+    - retryFailedForFabric()   : re-runs ONLY the errored templates of a fabric
+    - regenerateResult()       : re-rolls ONE single result card
+    - runBatch()               : loops fabrics sequentially (one /generate call
+                                 per fabric; templates run in parallel inside).
+                                 Sequential across fabrics keeps each call under
+                                 the 60s function limit regardless of queue size.
+    - handleGenerateAll()      : batch all "pending" fabrics
+    - handleRetryFailed()      : batch-retry all fabrics that have any failure
+
+TemplateManager.jsx  ("Active Templates" strip)
+  - Shows one filled slot per active template, plus a single "+" add slot that
+    appears until you hit 5 (then it disappears).
+  - Upload progress overlay on the add slot: Processing -> Uploading ->
+    Analyzing scene.
+  - Click a filled slot to edit it; "x" removes it from the active set (it stays
+    in the library). "Open Library" button.
+
+TemplateLibrary.jsx  (modal — the full catalog)
+  - Grid of ALL templates (active + inactive). Each card: thumbnail, label,
+    Activate/Deactivate, edit, delete.
+  - Enforces max 5 active. Upload tile to add brand-new templates.
+
+TemplateEditor.jsx  (modal — tune one template)
+  - Edit the label and the FULL prompt text sent to Gemini.
+  - Shows the auto-generated scene description (collapsible) for reference.
+  - Saves via PATCH /api/templates/{id}.
+
+FabricQueue.jsx  ("Fabrics" panel)
+  - Drag-drop / browse, MULTIPLE files at once.
+  - Each file is compressed client-side, then listed with thumbnail, editable
+    name, status pill, per-row ZIP (when done), and remove.
+  - Footer: Generate (N) primary button, "Retry failed (N)", "Clear completed".
+
+ResultsPanel.jsx  (grouped-by-fabric results)
+  - One row per fabric. The row shows the UPLOADED FABRIC as the first card,
+    then the result card for each template, in a horizontally-scrolling strip.
+  - Each result card: click image to ENLARGE (lightbox), download JPG, and a
+    Regenerate (re-roll) button. Errored cards show the error + a retry button.
+  - Skeleton shimmer placeholders while generating.
+  - "Download all (ZIP)" + per-row ZIP.
+
+StatusBar.jsx  (sticky bar, only while generating)
+  - "Generating fabric 2 of 5 — <name>", a progress bar, and
+    "Cancel after current".
+
+
+--------------------------------------------------------------------------------
+6. KEY UTILITIES
+--------------------------------------------------------------------------------
+src/utils/compressImage.js
+  - Canvas resize + JPEG re-encode in the browser BEFORE upload. Templates ->
+    1400px / 0.88 quality; fabrics -> 1600px / 0.9. This keeps requests under
+    Vercel's 4.5MB function body limit. Skips files already small + JPEG.
+
+src/utils/zip.js  (uses jszip)
+  - zipFabricResults(fabric) : one fabric's images -> {fabric}.zip
+  - zipAllResults(fabrics)   : everything -> subfolder per fabric
+  - downloadSingleResult()   : one image as {fabric}-{template}.jpg
+
+src/utils/dataUrlToBlob.js
+  - Converts the data:image/jpeg;base64 results into Blobs for zipping.
+
+
+--------------------------------------------------------------------------------
+7. END-TO-END WORKFLOWS
+--------------------------------------------------------------------------------
+A) Add a template
+   Upload image -> client compresses -> POST /api/templates -> image saved to
+   Blob, Gemini describes the scene, default prompt composed, auto-activated if
+   <5 active -> manifest written (new versioned file) -> UI refreshes.
+
+B) Generate a batch
+   Drop N fabrics (compressed, queued as "pending") -> "Generate" -> App loops
+   fabrics one at a time; for each, POST /api/generate runs all active templates
+   in parallel -> results stream into the grouped panel -> status bar tracks
+   progress. A template timing out (60s) only fails its own card.
+
+C) Fix a miss
+   - "Retry failed" (row or batch): re-runs only the errored templates.
+   - Regenerate (per card): re-rolls a single image (success or error) without
+     touching the others — your escape hatch for the occasional bad result,
+     since the model is stochastic.
+
+D) Download
+   Per image (JPG), per fabric (ZIP), or everything (ZIP with per-fabric
+   subfolders).
+
+
+--------------------------------------------------------------------------------
+8. NOTABLE DESIGN DECISIONS / GOTCHAS HANDLED
+--------------------------------------------------------------------------------
+- Ephemeral filesystem -> everything persisted in Vercel Blob.
+- Blob CDN caches by pathname -> versioned manifest filenames for fresh reads.
+- 4.5MB request limit -> client-side image compression.
+- Slow Gemini calls -> maxDuration 60s + a 60s per-call timeout guard.
+- Many fabrics could exceed 60s -> one /generate call PER FABRIC, sequential
+  across fabrics, parallel across templates within a fabric.
+- Recolor failure (model keeps template's pattern, just tints it) -> explicit
+  anti-recolor guard appended to every prompt + per-result Regenerate.
+- Max 5 active templates, deterministic active-state persistence.
+
+
+--------------------------------------------------------------------------------
+9. FILE MAP
+--------------------------------------------------------------------------------
+api/
+  templates.js            GET list / POST create
+  templates/[id].js       PATCH (edit/activate) / DELETE
+  generate.js             run a fabric vs templates (Gemini, 2 images)
+  _lib/
+    manifest.js           Blob read/write, versioning, active normalization
+    prompts.js            buildDefaultPrompt, FABRIC_TRANSFER_GUARD, composePrompt
+
+src/
+  App.jsx                 state + orchestration
+  components/
+    TemplateManager.jsx   active-templates strip + add slot
+    TemplateLibrary.jsx   full catalog modal
+    TemplateEditor.jsx    edit label + prompt modal
+    FabricQueue.jsx       multi-file upload queue
+    ResultsPanel.jsx      grouped results, lightbox, regenerate, ZIP
+    StatusBar.jsx         sticky batch progress
+  utils/
+    compressImage.js      client-side resize/encode
+    zip.js                ZIP builders + single download
+    dataUrlToBlob.js      data URL -> Blob
+  index.css               full styling (warm terracotta theme)
+
+NOTE: the older backend/ and frontend/ folders in the repo are LEGACY and not
+used by the live deployment — the active app is api/ + src/.
+
+================================================================================
