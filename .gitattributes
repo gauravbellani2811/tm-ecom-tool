@@ -1,0 +1,4 @@
+# Keep one line-ending style in the repo (the site is built on Linux)
+* text=auto eol=lf
+*.png binary
+*.jpg binary
