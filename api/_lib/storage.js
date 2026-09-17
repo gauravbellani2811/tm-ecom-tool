@@ -100,7 +100,11 @@ async function getJsonVersioned(key) {
   const res = await client().fetch(`${ENDPOINT}/${encodeURI(key)}`, { method: "GET" });
   if (res.status === 404) return { data: null, etag: null, exists: false };
   if (!res.ok) throw new Error(`R2 get failed (${res.status}) for ${key}`);
-  const etag = res.headers.get("etag");
+  // Cloudflare compresses larger responses on the way out and then labels the ETag
+  // "weak" (W/"…"). R2 only accepts the strong form in If-Match, so a weak tag would
+  // make every conditional save fail. The value inside is the object’s real ETag.
+  const rawEtag = res.headers.get("etag");
+  const etag = rawEtag ? rawEtag.replace(/^W\//, "") : rawEtag;
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { throw new Error(`Unreadable JSON in ${key}`); }
