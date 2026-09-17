@@ -113,7 +113,7 @@ async function getJsonVersioned(key) {
 
 // Write only if the object is unchanged since it was read (or, when it didn't exist,
 // still doesn't). Returns false on 412 (someone else wrote first).
-async function putJsonIfMatch(key, obj, { etag, exists }, log) {
+async function putJsonIfMatch(key, obj, { etag, exists }) {
   const headers = { "Content-Type": "application/json" };
   if (exists && etag) headers["If-Match"] = etag;
   else if (!exists) headers["If-None-Match"] = "*";
@@ -122,7 +122,6 @@ async function putJsonIfMatch(key, obj, { etag, exists }, log) {
     body: JSON.stringify(obj),
     headers,
   });
-  if (log) log.push({ sentHeaders: headers, status: res.status, body: res.ok ? "" : (await res.clone().text().catch(() => "")).slice(0, 300) });
   if (res.status === 412) return false;
   if (!res.ok) throw new Error(`R2 put failed (${res.status}) for ${key}`);
   return true;
@@ -138,18 +137,23 @@ const USE_CONDITIONAL_WRITES = false;
 // Read → mutate(data) → conditional write, retried on conflict. `mutate` gets the
 // freshly parsed file (null if missing) and returns the new value, or undefined for
 // "no change". It may run several times, so it must not have side effects.
-async function updateJson(key, mutate, { attempts = 12, conditional = USE_CONDITIONAL_WRITES, stats } = {}) {
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+// Retries until `budgetMs` has passed (not a fixed attempt count), sleeping a random
+// "full jitter" delay that grows with each conflict — so a burst of simultaneous
+// saves spreads out instead of colliding in lockstep. The budget stays well inside
+// the 30 s limit of the shortest endpoint that saves.
+async function updateJson(key, mutate, { budgetMs = 20000, conditional = USE_CONDITIONAL_WRITES, stats } = {}) {
+  const deadline = Date.now() + budgetMs;
+  for (let attempt = 1; ; attempt++) {
     if (stats) stats.attempts = attempt;
     const { data, etag, exists } = await getJsonVersioned(key);
     const next = await mutate(data);
     if (next === undefined) return { data, changed: false };
     if (!conditional) { await putJson(key, next); return { data: next, changed: true }; }
-    if (stats && !stats.log) stats.log = [];
-    if (stats && stats.log.length < 3) stats.log.push({ attempt, readEtag: etag, exists, dataType: Array.isArray(data) ? "array" : typeof data });
-    if (await putJsonIfMatch(key, next, { etag, exists }, stats && stats.log.length < 6 ? stats.log : null)) return { data: next, changed: true };
+    if (await putJsonIfMatch(key, next, { etag, exists })) return { data: next, changed: true };
     if (stats) stats.conflicts = (stats.conflicts || 0) + 1;
-    await sleep(40 + Math.random() * 260 * attempt);
+    const wait = Math.random() * Math.min(1500, 100 * 2 ** Math.min(attempt, 6));
+    if (Date.now() + wait >= deadline) break;
+    await sleep(wait);
   }
   throw new Error(`Too many simultaneous saves to ${key} — please try again`);
 }
@@ -176,7 +180,6 @@ async function probeConcurrentUpdates({ n = 25, padKB = 1 } = {}) {
     succeeded: results.filter(r => r.ok).length,
     itemsInFile: ((final && final.items) || []).length,
     attemptsPerSave: results.map(r => r.attempts),
-    firstSaveLog: results[0] && results[0].log,
     errors: [...new Set(results.filter(r => !r.ok).map(r => r.error))],
   };
 }
