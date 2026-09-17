@@ -4,6 +4,7 @@ import { downloadRunCaptions, plainPreview } from "../utils/captionCsv";
 import { apiFetch } from "../utils/api";
 import RetryThreeModal from "./RetryThreeModal";
 import { preloadImage } from "../utils/preload";
+import { enqueueSave, retryFailedSaves, httpError } from "../utils/saveQueue";
 import CompareRetryModal from "./CompareRetryModal";
 
 export const PRO_CONFIRM = "Regenerate with the Pro model? Pro is higher quality but costs about 2× a normal image.";
@@ -156,7 +157,7 @@ export default function HistoryModal({ onClose, isAdmin, templates, scope = "min
     else fd.append("image", await (await fetch(imageDataUrl)).blob(), "retry.jpg");
     const res = await apiFetch("/api/history-add", { method: "POST", body: fd });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error((data && data.error) || "Save failed");
+    if (!res.ok) throw httpError(res, (data && data.error) || "Save failed");
     return data.image || null;
   }
 
@@ -223,22 +224,29 @@ export default function HistoryModal({ onClose, isAdmin, templates, scope = "min
   function dismissRetry(key) { setOpenKey(null); setEntry(key, null); }
 
   // Persist the chosen image + swap the tile in place (no full history reload).
-  async function applyRetry(key, imageDataUrl) {
+  // The tile shows the chosen image straight away; the save itself goes through the
+  // one-at-a-time save queue. If it still fails after automatic retries the tile keeps
+  // the chosen image marked "Not saved" with a Retry — the pick is never thrown away.
+  function applyRetry(key, imageDataUrl) {
     const entry = retries[key];
     if (!entry) return;
     const { run, image } = entry;
     setOpenKey(null);
-    setEntry(key, { status: "saving" });
-    patchImageUrl(run.id, image.templateId, imageDataUrl); // optimistic
-    try {
-      const saved = await saveToHistory(run, image, imageDataUrl);
-      if (saved && saved.url) patchImageUrl(run.id, image.templateId, saved.url, saved.thumb);
-      setEntry(key, null);
-    } catch (err) {
-      patchImageUrl(run.id, image.templateId, image.url, image.thumb); // revert
-      setEntry(key, { status: "error", error: err.message });
-      setError("Couldn't save the new image: " + err.message);
-    }
+    setEntry(key, { status: "saving", imageDataUrl, error: undefined });
+    patchImageUrl(run.id, image.templateId, imageDataUrl, undefined); // optimistic
+    enqueueSave({
+      label: `${run.fabricName} — ${image.templateLabel}`,
+      run: () => saveToHistory(run, image, imageDataUrl),
+      onSuccess: saved => {
+        if (saved && saved.url) patchImageUrl(run.id, image.templateId, saved.url, saved.thumb);
+        setEntry(key, null);
+      },
+      onRetry: () => setEntry(key, { status: "saving", error: undefined }),
+      onFailure: err => {
+        setEntry(key, { status: "unsaved", error: err.message });
+        setError("A replacement couldn't be saved yet — use Retry on the tile or the red notice at the top.");
+      },
+    });
   }
 
   async function load() {
@@ -302,21 +310,25 @@ export default function HistoryModal({ onClose, isAdmin, templates, scope = "min
     if (!window.confirm(msg)) return;
     setDeletingSelected(true);
     setError(null);
-    try {
-      const res = await apiFetch("/api/history" + scopeQs, {
-        method: "DELETE", admin: allUsers,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls }),
-      });
-      if (!res.ok) { setError("Failed to delete selected images"); return; }
-      const updated = await res.json();
-      setRecords(Array.isArray(updated) ? updated : []);
-      setSelected(new Set());
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setDeletingSelected(false);
-    }
+    enqueueSave({
+      label: `Delete ${n} image${n === 1 ? "" : "s"}`,
+      run: async () => {
+        const res = await apiFetch("/api/history" + scopeQs, {
+          method: "DELETE", admin: allUsers,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ urls }),
+        });
+        if (!res.ok) throw httpError(res, "Failed to delete selected images");
+        return res.json();
+      },
+      onSuccess: updated => {
+        setRecords(Array.isArray(updated) ? updated : []);
+        setSelected(new Set());
+        setDeletingSelected(false);
+      },
+      onRetry: () => setDeletingSelected(true),
+      onFailure: err => { setError(err.message); setDeletingSelected(false); },
+    });
   }
 
   async function deleteRun(rec) {
@@ -326,16 +338,17 @@ export default function HistoryModal({ onClose, isAdmin, templates, scope = "min
     if (!window.confirm(msg)) return;
     setBusyId(rec.id);
     setError(null);
-    try {
-      const res = await apiFetch(`/api/history/${rec.id}` + scopeQs, { method: "DELETE", admin: allUsers });
-      if (!res.ok) { setError("Failed to delete record"); return; }
-      const updated = await res.json();
-      setRecords(Array.isArray(updated) ? updated : []);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusyId(null);
-    }
+    enqueueSave({
+      label: `Delete ${rec.fabricName}`,
+      run: async () => {
+        const res = await apiFetch(`/api/history/${rec.id}` + scopeQs, { method: "DELETE", admin: allUsers });
+        if (!res.ok) throw httpError(res, "Failed to delete record");
+        return res.json();
+      },
+      onSuccess: updated => { setRecords(Array.isArray(updated) ? updated : []); setBusyId(null); },
+      onRetry: () => setBusyId(rec.id),
+      onFailure: err => { setError(err.message); setBusyId(null); },
+    });
   }
 
   async function clearAll() {
@@ -347,20 +360,21 @@ export default function HistoryModal({ onClose, isAdmin, templates, scope = "min
     if (!window.confirm(msg)) return;
     setBusyId("__all__");
     setError(null);
-    try {
-      const res = await apiFetch("/api/history" + scopeQs, {
-        method: "DELETE", admin: allUsers,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirmClearAll: true }),
-      });
-      if (!res.ok) { setError("Failed to clear history"); return; }
-      setRecords([]);
-      setSelected(new Set());
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusyId(null);
-    }
+    enqueueSave({
+      label: "Clear history",
+      run: async () => {
+        const res = await apiFetch("/api/history" + scopeQs, {
+          method: "DELETE", admin: allUsers,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ confirmClearAll: true }),
+        });
+        if (!res.ok) throw httpError(res, "Failed to clear history");
+        return res.json();
+      },
+      onSuccess: updated => { setRecords(Array.isArray(updated) ? updated : []); setSelected(new Set()); setBusyId(null); },
+      onRetry: () => setBusyId("__all__"),
+      onFailure: err => { setError(err.message); setBusyId(null); },
+    });
   }
 
   const totalImages = (records || []).reduce((n, r) => n + (r.images || []).filter(im => !HIDDEN_META.has(im.templateId)).length, 0);
@@ -571,6 +585,12 @@ export default function HistoryModal({ onClose, isAdmin, templates, scope = "min
                                   </span>
                                 ) : entry && entry.status === "saving" ? (
                                   <span style={{ flex: 1, textAlign: "center", fontSize: 11, color: "#857a6c" }}>Saving…</span>
+                                ) : entry && entry.status === "unsaved" ? (
+                                  <>
+                                    <span title={entry.error} style={{ flex: 1, textAlign: "center", fontSize: 11, fontWeight: 600, color: "#B33A1F" }}>⚠ Not saved</span>
+                                    <button className="btn btn-tiny btn-primary" style={{ flex: 1 }} onClick={retryFailedSaves}
+                                      title="Try saving this replacement again (no regeneration)">Retry</button>
+                                  </>
                                 ) : entry && entry.status === "ready" ? (
                                   <>
                                     <button className="btn btn-tiny btn-primary" style={{ flex: 1 }} onClick={() => setOpenKey(rk)}

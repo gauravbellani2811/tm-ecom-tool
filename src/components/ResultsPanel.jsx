@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { downloadSingleResult, downloadAllResults, downloadFabricResults } from "../utils/zip";
 import { downloadSessionCaptions, plainPreview } from "../utils/captionCsv";
+import { retryFailedSaves } from "../utils/saveQueue";
 
 const retryOverlayStyle = { position: "absolute", inset: 0, background: "rgba(42,33,24,0.6)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, borderRadius: 8 };
 const chipSpinner = { width: 11, height: 11, borderWidth: 1.5 };
@@ -64,6 +65,12 @@ function ResultCard({ fabric, result, entry, onEnlarge, onRegenerate, onStartRet
               </span>
             ) : entry && entry.status === "saving" ? (
               <span style={{ fontSize: 11, color: "#857a6c" }}>Saving…</span>
+            ) : entry && entry.status === "unsaved" ? (
+              <>
+                <span title={entry.error} style={{ fontSize: 11, fontWeight: 600, color: "#B33A1F" }}>⚠ Not saved</span>
+                <button className="btn btn-tiny btn-primary" onClick={retryFailedSaves}
+                  title="Try saving this replacement to History again (no regeneration)">Retry</button>
+              </>
             ) : entry && entry.status === "ready" ? (
               <>
                 <button className="btn btn-tiny btn-primary" onClick={onOpenCompare} title="Compare and choose whether to replace">

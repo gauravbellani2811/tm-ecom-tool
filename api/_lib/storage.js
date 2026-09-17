@@ -129,10 +129,9 @@ async function putJsonIfMatch(key, obj, { etag, exists }) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// OFF until R2's conditional-write behaviour is verified live (the first rollout
-// refused every save). While off, updateJson does a plain read → change → write,
-// exactly like before — but still never treats a failed read as an empty file.
-const USE_CONDITIONAL_WRITES = false;
+// Verified on staging (after the weak-ETag fix). Kept as a switch so it can be turned
+// off quickly: when false, updateJson does a plain read → change → write.
+const USE_CONDITIONAL_WRITES = true;
 
 // Read → mutate(data) → conditional write, retried on conflict. `mutate` gets the
 // freshly parsed file (null if missing) and returns the new value, or undefined for
@@ -156,63 +155,6 @@ async function updateJson(key, mutate, { budgetMs = 20000, conditional = USE_CON
     await sleep(wait);
   }
   throw new Error(`Too many simultaneous saves to ${key} — please try again`);
-}
-
-// Diagnostic: N simultaneous conditional updates to a throwaway file padded to
-// `padKB` (to mimic the multi-MB history file). Reports how many landed.
-async function probeConcurrentUpdates({ n = 25, padKB = 1 } = {}) {
-  const key = "zz-concurrency-probe.json";
-  await putJson(key, { pad: "x".repeat(padKB * 1024), items: [] });
-  const t0 = Date.now();
-  const results = await Promise.all(Array.from({ length: n }, async (_, i) => {
-    const stats = { attempts: 0, conflicts: 0 };
-    try {
-      await updateJson(key, d => ({ ...d, items: [...((d && d.items) || []), i] }), { conditional: true, stats });
-      return { ok: true, ...stats };
-    } catch (e) {
-      return { ok: false, error: e.message, ...stats };
-    }
-  }));
-  const final = (await getJsonVersioned(key)).data;
-  await deleteKeys([key]);
-  return {
-    n, padKB, ms: Date.now() - t0,
-    succeeded: results.filter(r => r.ok).length,
-    itemsInFile: ((final && final.items) || []).length,
-    attemptsPerSave: results.map(r => r.attempts),
-    errors: [...new Set(results.filter(r => !r.ok).map(r => r.error))],
-  };
-}
-
-// Diagnostic: exercise R2 conditional writes on a throwaway key and report exactly
-// what R2 answers (statuses, ETag headers, error bodies). Touches nothing else.
-async function probeConditionalWrites() {
-  const key = "zz-etag-probe.json";
-  const url = `${ENDPOINT}/${encodeURI(key)}`;
-  const call = async (label, opts) => {
-    const res = await client().fetch(url, opts);
-    const body = await res.text().catch(() => "");
-    const headers = {};
-    res.headers.forEach((v, k) => { if (/etag|content-length|content-type|cf-|x-amz/i.test(k)) headers[k] = v; });
-    return { label, status: res.status, etag: res.headers.get("etag"), headers, body: res.ok && opts.method === "GET" ? body.slice(0, 60) : body.slice(0, 400) };
-  };
-  const put = (label, n, extra = {}) => call(label, {
-    method: "PUT", body: JSON.stringify({ n }), headers: { "Content-Type": "application/json", ...extra },
-  });
-  const steps = [];
-  steps.push(await put("1 plain PUT", 1));
-  const g1 = await call("2 GET", { method: "GET" }); steps.push(g1);
-  const h1 = await call("3 HEAD", { method: "HEAD" }); steps.push(h1);
-  steps.push(await put("4 PUT If-Match <etag from GET> (expect 200)", 2, g1.etag ? { "If-Match": g1.etag } : {}));
-  const g2 = await call("5 GET", { method: "GET" }); steps.push(g2);
-  steps.push(await put("6 PUT If-Match <stale etag> (expect 412)", 3, g1.etag ? { "If-Match": g1.etag } : {}));
-  const bare = (g2.etag || "").replace(/^W\//, "").replace(/"/g, "");
-  steps.push(await put("7 PUT If-Match <unquoted etag> (expect 200)", 4, bare ? { "If-Match": bare } : {}));
-  steps.push(await put("8 PUT If-None-Match * on existing (expect 412)", 5, { "If-None-Match": "*" }));
-  await call("9 DELETE", { method: "DELETE" });
-  steps.push(await put("10 PUT If-None-Match * on missing (expect 200)", 6, { "If-None-Match": "*" }));
-  steps.push(await call("11 DELETE (cleanup)", { method: "DELETE" }));
-  return steps;
 }
 
 // One page (up to 1000) of objects under a prefix: [{ key, lastModified }].
@@ -243,4 +185,4 @@ async function deleteKeys(keys) {
   ));
 }
 
-module.exports = { putObject, putImage, putJson, copyObject, getObjectText, getObjectBuffer, isStoredImageKey, listObjects, probeConditionalWrites, probeConcurrentUpdates, getJsonVersioned, putJsonIfMatch, updateJson, getJson, urlToKey, deleteKeys, publicUrl };
+module.exports = { putObject, putImage, putJson, copyObject, getObjectText, getObjectBuffer, isStoredImageKey, listObjects, getJsonVersioned, putJsonIfMatch, updateJson, getJson, urlToKey, deleteKeys, publicUrl };

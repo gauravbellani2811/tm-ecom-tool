@@ -20,6 +20,8 @@ import { compressImage } from "./utils/compressImage";
 import { cropToSquare } from "./utils/cropImage";
 import { apiFetch, getAuth, setAuth } from "./utils/api";
 import { preloadImage } from "./utils/preload";
+import { enqueueSave, httpError } from "./utils/saveQueue";
+import SaveIndicator from "./components/SaveIndicator";
 
 const FLAT_ID = "__flat__";
 
@@ -462,31 +464,35 @@ export default function App() {
   function dismissResultRetry(key) { setResultOpenKey(null); setResultEntry(key, null); }
 
   // Apply the chosen image to the card + persist to history in the background.
-  async function applyResultRetry(key, imageDataUrl) {
+  // The card shows the chosen image straight away; the History save goes through the
+  // one-at-a-time save queue (see utils/saveQueue). A save that still fails after
+  // automatic retries keeps the chosen image marked "Not saved" with a Retry.
+  function applyResultRetry(key, imageDataUrl) {
     const e = resultRetries[key];
     if (!e) return;
     setResultOpenKey(null);
-    setResultEntry(key, { status: "saving" });
-    const swap = url => updateFabric(e.fabricId, f => ({
+    setResultEntry(key, { status: "saving", imageDataUrl, error: undefined });
+    updateFabric(e.fabricId, f => ({
       ...f,
       results: f.results.map(r => r.templateId === e.templateId
-        ? { templateId: e.templateId, templateLabel: e.templateLabel, imageDataUrl: url } : r),
+        ? { templateId: e.templateId, templateLabel: e.templateLabel, imageDataUrl } : r),
     }));
-    swap(imageDataUrl); // optimistic
-    try {
-      const fd = new FormData();
-      fd.append("runId", e.runId); fd.append("fabricName", e.fabricName);
-      fd.append("templateId", e.templateId); fd.append("templateLabel", e.templateLabel);
-      if (/^https?:/.test(imageDataUrl)) fd.append("sourceUrl", imageDataUrl); // stored candidate → server-side copy
-      else fd.append("image", await (await fetch(imageDataUrl)).blob(), "retry.jpg");
-      const res = await apiFetch("/api/history-add", { method: "POST", body: fd });
-      if (!res.ok) throw new Error("Save failed");
-      setResultEntry(key, null);
-    } catch (err) {
-      if (e.currentUrl) swap(e.currentUrl); // revert
-      setResultEntry(key, { status: "error", error: err.message });
-      setError("Couldn't save the new image: " + err.message);
-    }
+    enqueueSave({
+      label: `${e.fabricName} — ${e.templateLabel}`,
+      run: async () => {
+        const fd = new FormData();
+        fd.append("runId", e.runId); fd.append("fabricName", e.fabricName);
+        fd.append("templateId", e.templateId); fd.append("templateLabel", e.templateLabel);
+        if (/^https?:/.test(imageDataUrl)) fd.append("sourceUrl", imageDataUrl); // stored candidate → server-side copy
+        else fd.append("image", await (await fetch(imageDataUrl)).blob(), "retry.jpg");
+        const res = await apiFetch("/api/history-add", { method: "POST", body: fd });
+        if (!res.ok) throw httpError(res, "Save failed");
+        return res.json();
+      },
+      onSuccess: () => setResultEntry(key, null),
+      onRetry: () => setResultEntry(key, { status: "saving", error: undefined }),
+      onFailure: err => setResultEntry(key, { status: "unsaved", error: err.message }),
+    });
   }
 
   async function runBatch(targetFabrics) {
@@ -588,6 +594,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <SaveIndicator />
       <header className="app-header">
         <div className="app-header-inner">
           <Brand variant="header" />

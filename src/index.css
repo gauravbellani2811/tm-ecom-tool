@@ -391,6 +391,29 @@ input, textarea {
   text-align: center;
   padding: 12px;
 }
+/* ===== Save queue indicator (fixed, above all modals) ===== */
+.save-indicator {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--text);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: var(--shadow-lg);
+  white-space: nowrap;
+}
+.save-indicator-spinner { width: 13px; height: 13px; border-width: 2px; border-color: rgba(255,255,255,0.35); border-top-color: #fff; }
+.save-indicator-error { background: var(--error); }
+.save-indicator-failed { color: #FFD9CC; }
+
 .slot-spinner {
   width: 22px; height: 22px;
   border-radius: 50%;
