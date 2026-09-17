@@ -109,7 +109,7 @@ async function getJsonVersioned(key) {
 
 // Write only if the object is unchanged since it was read (or, when it didn't exist,
 // still doesn't). Returns false on 412 (someone else wrote first).
-async function putJsonIfMatch(key, obj, { etag, exists }) {
+async function putJsonIfMatch(key, obj, { etag, exists }, log) {
   const headers = { "Content-Type": "application/json" };
   if (exists && etag) headers["If-Match"] = etag;
   else if (!exists) headers["If-None-Match"] = "*";
@@ -118,6 +118,7 @@ async function putJsonIfMatch(key, obj, { etag, exists }) {
     body: JSON.stringify(obj),
     headers,
   });
+  if (log) log.push({ sentHeaders: headers, status: res.status, body: res.ok ? "" : (await res.clone().text().catch(() => "")).slice(0, 300) });
   if (res.status === 412) return false;
   if (!res.ok) throw new Error(`R2 put failed (${res.status}) for ${key}`);
   return true;
@@ -140,7 +141,9 @@ async function updateJson(key, mutate, { attempts = 12, conditional = USE_CONDIT
     const next = await mutate(data);
     if (next === undefined) return { data, changed: false };
     if (!conditional) { await putJson(key, next); return { data: next, changed: true }; }
-    if (await putJsonIfMatch(key, next, { etag, exists })) return { data: next, changed: true };
+    if (stats && !stats.log) stats.log = [];
+    if (stats && stats.log.length < 3) stats.log.push({ attempt, readEtag: etag, exists, dataType: Array.isArray(data) ? "array" : typeof data });
+    if (await putJsonIfMatch(key, next, { etag, exists }, stats && stats.log.length < 6 ? stats.log : null)) return { data: next, changed: true };
     if (stats) stats.conflicts = (stats.conflicts || 0) + 1;
     await sleep(40 + Math.random() * 260 * attempt);
   }
@@ -169,6 +172,7 @@ async function probeConcurrentUpdates({ n = 25, padKB = 1 } = {}) {
     succeeded: results.filter(r => r.ok).length,
     itemsInFile: ((final && final.items) || []).length,
     attemptsPerSave: results.map(r => r.attempts),
+    firstSaveLog: results[0] && results[0].log,
     errors: [...new Set(results.filter(r => !r.ok).map(r => r.error))],
   };
 }
