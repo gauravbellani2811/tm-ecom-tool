@@ -16,3 +16,6 @@ frontend/
 .DS_Store
 Thumbs.db
 *.log
+
+# Personal Claude Code permissions (not shared)
+.claude/settings.local.json
